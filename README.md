@@ -43,7 +43,7 @@ format = "text"    # text | json
 
 [paths]
 database = "~/.local/share/offbeat/offbeat.db"
-music_root = "~/Music/Localify"
+music_root = "~/Music/Offbeat"
 
 [acquisition]
 concurrency = 2

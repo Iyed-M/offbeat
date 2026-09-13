@@ -1,22 +1,22 @@
-# Localify v1 — Product Requirements Document
+# Offbeat v1 — Product Requirements Document
 
 ## 1. Product Summary
 
-Localify is a personal, local-first system that mirrors a user's Spotify playlists and Liked Songs into an offline music library available on:
+Offbeat is a personal, local-first system that mirrors a user's Spotify playlists and Liked Songs into an offline music library available on:
 
 * a Linux desktop;
 * an Android phone on the same local network.
 
 Spotify remains the source of truth for playlist membership, playlist ordering, playlist names, and Liked Songs.
 
-Localify consists of four primary components:
+Offbeat consists of four primary components:
 
 1. a Spicetify extension running inside Spotify Desktop;
 2. an always-running Go daemon on Linux;
 3. a Linux CLI that controls and inspects the daemon;
 4. a minimal native Android synchronization application.
 
-Localify does not implement music playback. On desktop and Android it produces ordinary audio files plus standard `.m3u8` playlists that can be consumed by existing music players.
+Offbeat does not implement music playback. On desktop and Android it produces ordinary audio files plus standard `.m3u8` playlists that can be consumed by existing music players.
 
 ---
 
@@ -43,7 +43,7 @@ Spotify itself is not used for offline audio storage.
 
 ## 3.1 Primary goals
 
-Localify v1 must:
+Offbeat v1 must:
 
 1. mirror all normal Spotify music playlists;
 2. mirror all Liked Songs;
@@ -72,8 +72,8 @@ The following are explicitly outside v1:
 * Windows support;
 * macOS support;
 * iOS support;
-* editing Spotify playlists from Localify;
-* editing Spotify Liked Songs from Localify;
+* editing Spotify playlists from Offbeat;
+* editing Spotify Liked Songs from Offbeat;
 * bidirectional synchronization with Spotify;
 * Android-to-PC metadata edits;
 * Spotify integration on Android;
@@ -92,7 +92,7 @@ The following are explicitly outside v1:
 
 The acquisition subsystem must only operate on sources the user is authorized to download.
 
-`yt-dlp` is a media retrieval backend, not Localify's Spotify catalog downloader.
+`yt-dlp` is a media retrieval backend, not Offbeat's Spotify catalog downloader.
 
 The product architecture must separate:
 
@@ -147,13 +147,13 @@ The resolver architecture must remain pluggable.
                     ┌───────────┴────────────┐
                     │                        │
                     ▼                        ▼
-           ~/Music/Localify/        HTTPS LAN sync API
+           ~/Music/Offbeat/        HTTPS LAN sync API
                                              │
                                              ▼
                                     Android companion
                                              │
                                              ▼
-                                     Music/Localify/
+                                     Music/Offbeat/
                                              │
                                              ▼
                                     existing music player
@@ -200,7 +200,7 @@ It must not:
 
 Every Spotify synchronization produces a candidate snapshot.
 
-A candidate snapshot is valid only if Localify successfully obtains:
+A candidate snapshot is valid only if Offbeat successfully obtains:
 
 * the complete playlist list;
 * every page of Liked Songs;
@@ -273,13 +273,13 @@ They must not break snapshot import.
 
 ## 8.4 Eventual consistency
 
-Spotify does not provide Localify with a cross-library transactional snapshot.
+Spotify does not provide Offbeat with a cross-library transactional snapshot.
 
-Localify therefore accepts that Spotify may change while a snapshot is being collected.
+Offbeat therefore accepts that Spotify may change while a snapshot is being collected.
 
 A successfully fetched snapshot is treated as a valid observation.
 
-Later snapshots converge Localify toward newer Spotify state.
+Later snapshots converge Offbeat toward newer Spotify state.
 
 ---
 
@@ -338,7 +338,7 @@ systemd --user
 
 It starts independently of Spotify.
 
-Spotify being stopped must not stop Localify.
+Spotify being stopped must not stop Offbeat.
 
 ---
 
@@ -354,7 +354,7 @@ Spotify being stopped must not stop Localify.
 * Android sync state;
 * pairing state.
 
-No other Localify component may directly mutate the database.
+No other Offbeat component may directly mutate the database.
 
 ---
 
@@ -449,22 +449,22 @@ SQLite should model at least:
 Default media root:
 
 ```text
-~/Music/Localify/
+~/Music/Offbeat/
 ```
 
 Layout:
 
 ```text
-~/Music/Localify/
+~/Music/Offbeat/
 ├── tracks/
 └── playlists/
 ```
 
 The root must be configurable.
 
-Localify owns the directory structure.
+Offbeat owns the directory structure.
 
-External applications may read/play the files but must treat Localify-managed content as read-only.
+External applications may read/play the files but must treat Offbeat-managed content as read-only.
 
 ---
 
@@ -712,7 +712,7 @@ managed asset
 
 `yt-dlp` is responsible for media retrieval.
 
-Localify owns normalization/tagging.
+Offbeat owns normalization/tagging.
 
 FFmpeg is used only when technically necessary.
 
@@ -726,7 +726,7 @@ Rule:
 
 > Quality takes priority over disk usage.
 
-Localify should:
+Offbeat should:
 
 * preserve good source quality;
 * avoid transcoding simply to save storage;
@@ -787,7 +787,7 @@ The stable suffix prevents collisions.
 Desktop playlists live under:
 
 ```text
-~/Music/Localify/playlists/
+~/Music/Offbeat/playlists/
 ```
 
 Format:
@@ -854,7 +854,7 @@ Its Spotify ordering must be preserved.
 
 # 31. Duplicate Playlist Entries
 
-If Spotify intentionally includes the same track multiple times in a playlist, Localify must preserve every occurrence.
+If Spotify intentionally includes the same track multiple times in a playlist, Offbeat must preserve every occurrence.
 
 One physical asset may therefore appear multiple times in one M3U8 file.
 
@@ -873,7 +873,7 @@ then its local asset becomes eligible for deletion.
 
 Deletion behavior is immediate at the logical state level.
 
-Physical deletion may wait until Localify-controlled operations release the file.
+Physical deletion may wait until Offbeat-controlled operations release the file.
 
 If an asset is shared by other still-desired Spotify tracks, it must remain.
 
@@ -881,7 +881,7 @@ If an asset is shared by other still-desired Spotify tracks, it must remain.
 
 # 33. Missing/Corrupt Local Assets
 
-If Localify detects that a referenced managed asset:
+If Offbeat detects that a referenced managed asset:
 
 * disappeared;
 * is invalid;
@@ -905,7 +905,7 @@ which may perform SHA-256 verification.
 
 # 34. Revision History
 
-Localify should retain lightweight revision/diff history.
+Offbeat should retain lightweight revision/diff history.
 
 Example:
 
@@ -982,7 +982,7 @@ Error/progress states must be visible.
 Default output:
 
 ```text
-Music/Localify/
+Music/Offbeat/
 ├── tracks/
 └── playlists/
 ```
@@ -996,7 +996,7 @@ Android is a read-only replica.
 It never independently:
 
 * edits tags;
-* renames Localify files;
+* renames Offbeat files;
 * changes playlists;
 * sends playlist/like modifications upstream.
 
@@ -1106,7 +1106,7 @@ Sync now
 WorkManager opportunistically performs sync when:
 
 * Wi-Fi/network conditions permit;
-* the paired Localify daemon is discoverable/reachable.
+* the paired Offbeat daemon is discoverable/reachable.
 
 Instant background synchronization is not required.
 
@@ -1132,7 +1132,7 @@ Historical revisions do not need to be replayed.
 
 # 45. Delta Sync
 
-Android compares its current Localify state against the newest manifest.
+Android compares its current Offbeat state against the newest manifest.
 
 The resulting plan may contain:
 
@@ -1176,7 +1176,7 @@ Required order:
 4. resume interrupted files when possible;
 5. verify each completed file;
 6. publish verified assets;
-7. remove obsolete Localify assets according to the plan;
+7. remove obsolete Offbeat assets according to the plan;
 8. replace playlist files last;
 9. commit local revision marker.
 
@@ -1186,7 +1186,7 @@ If sync fails midway, the previously valid playlists should remain usable.
 
 # 48. Android Storage Preflight
 
-Before modifying the Android library, Localify must determine whether enough storage is available.
+Before modifying the Android library, Offbeat must determine whether enough storage is available.
 
 If storage is insufficient:
 
@@ -1243,7 +1243,7 @@ The extension uses that credential when connecting.
 offbeat setup
 ```
 
-should configure components Localify controls:
+should configure components Offbeat controls:
 
 * config/data directories;
 * SQLite initialization;
@@ -1397,14 +1397,14 @@ v1 is complete when the following works end-to-end:
 
 1. Linux login starts `offbeatd` through `systemd --user`.
 2. Spotify starts.
-3. Localify's Spicetify extension connects to the daemon.
+3. Offbeat's Spicetify extension connects to the daemon.
 4. The extension collects all supported playlists and Liked Songs.
 5. The daemon receives a complete valid candidate snapshot.
 6. The snapshot is atomically committed.
 7. Missing tracks are identified.
 8. Initial acquisition waits for explicit first-time approval.
 9. After approval, eligible missing tracks enter the persistent acquisition pipeline.
-10. Successfully acquired media becomes managed Localify assets.
+10. Successfully acquired media becomes managed Offbeat assets.
 11. Metadata/artwork is applied where possible.
 12. Desktop M3U8 playlists are generated.
 13. Playable tracks preserve Spotify ordering.

@@ -66,7 +66,7 @@ func Defaults(home string) Config {
 	cfg.Paths.DataDir = filepath.Join(home, ".local", "share", AppDirName)
 	cfg.Paths.StateDir = filepath.Join(home, ".local", "state", AppDirName)
 	cfg.Paths.CacheDir = filepath.Join(home, ".cache", AppDirName)
-	cfg.Paths.MusicRoot = filepath.Join(home, "Music", "Localify")
+	cfg.Paths.MusicRoot = filepath.Join(home, "Music", "Offbeat")
 	cfg.Paths.Database = filepath.Join(cfg.Paths.DataDir, "offbeat.db")
 	cfg.Paths.SocketDir = filepath.Join(cfg.Paths.StateDir, "ipc")
 	cfg.Paths.CertsDir = filepath.Join(cfg.Paths.StateDir, "certs")
@@ -169,7 +169,7 @@ func applyDerived(cfg Config, home string) Config {
 		cfg.Paths.Database = filepath.Join(cfg.Paths.DataDir, "offbeat.db")
 	}
 	if !filepath.IsAbs(cfg.Paths.MusicRoot) {
-		cfg.Paths.MusicRoot = filepath.Join(home, "Music", "Localify")
+		cfg.Paths.MusicRoot = filepath.Join(home, "Music", "Offbeat")
 	}
 	return cfg
 }

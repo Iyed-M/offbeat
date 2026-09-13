@@ -15,7 +15,7 @@ func TestDefaults(t *testing.T) {
 		{"ConfigDir", cfg.Paths.ConfigDir, "/home/test/.config/offbeat"},
 		{"DataDir", cfg.Paths.DataDir, "/home/test/.local/share/offbeat"},
 		{"Database", cfg.Paths.Database, "/home/test/.local/share/offbeat/offbeat.db"},
-		{"MusicRoot", cfg.Paths.MusicRoot, "/home/test/Music/Localify"},
+		{"MusicRoot", cfg.Paths.MusicRoot, "/home/test/Music/Offbeat"},
 		{"CertsDir", cfg.Paths.CertsDir, "/home/test/.local/state/offbeat/certs"},
 	}
 	for _, c := range want {
