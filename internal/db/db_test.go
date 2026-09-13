@@ -2,11 +2,33 @@ package db
 
 import (
 	"context"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+type migrationSource map[string]string
+
+func (s migrationSource) ReadDir(string) ([]fs.DirEntry, error) {
+	entries := make([]fs.DirEntry, 0, len(s))
+	for name := range s {
+		entries = append(entries, migrationEntry(name))
+	}
+	return entries, nil
+}
+
+func (s migrationSource) ReadFile(name string) ([]byte, error) {
+	return []byte(s[strings.TrimPrefix(name, "migrations/")]), nil
+}
+
+type migrationEntry string
+
+func (e migrationEntry) Name() string             { return string(e) }
+func (migrationEntry) IsDir() bool                { return false }
+func (migrationEntry) Type() fs.FileMode          { return 0 }
+func (migrationEntry) Info() (fs.FileInfo, error) { return nil, nil }
 
 func newTestDB(t *testing.T) *DB {
 	t.Helper()
@@ -111,5 +133,39 @@ func TestEmbeddedMigrationsAreOrdered(t *testing.T) {
 		if migs[i].Version <= migs[i-1].Version {
 			t.Fatalf("not sorted: %d <= %d", migs[i].Version, migs[i-1].Version)
 		}
+	}
+}
+
+func TestLoadMigrationsRejectsDuplicateAndNonPositiveVersions(t *testing.T) {
+	tests := []struct {
+		name   string
+		source migrationSource
+	}{
+		{
+			name: "duplicate version",
+			source: migrationSource{
+				"0001_first.sql":  "CREATE TABLE first_table (id INTEGER);",
+				"0001_second.sql": "CREATE TABLE second_table (id INTEGER);",
+			},
+		},
+		{
+			name: "zero version",
+			source: migrationSource{
+				"0000_initial.sql": "CREATE TABLE initial_table (id INTEGER);",
+			},
+		},
+		{
+			name: "negative version",
+			source: migrationSource{
+				"-1_initial.sql": "CREATE TABLE initial_table (id INTEGER);",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := LoadMigrations(tt.source, "migrations"); err == nil {
+				t.Fatal("LoadMigrations succeeded")
+			}
+		})
 	}
 }

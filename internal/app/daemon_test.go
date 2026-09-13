@@ -1,10 +1,14 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,6 +84,61 @@ func TestRunRespondsToSignal(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after signal")
+	}
+}
+
+func TestRunRespondsToSIGTERM(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
+	cmd.Env = append(os.Environ(), "OFFBEAT_DAEMON_HELPER=1", "OFFBEAT_HOME="+dir)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("create daemon helper stderr pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start daemon helper: %v", err)
+	}
+
+	started := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			if strings.Contains(scanner.Text(), "offbeatd started") {
+				started <- true
+				return
+			}
+		}
+		started <- false
+	}()
+	select {
+	case ok := <-started:
+		if !ok {
+			_ = cmd.Wait()
+			t.Fatal("daemon helper exited before starting")
+		}
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("daemon helper did not start")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("daemon helper did not exit cleanly: %v", err)
+	}
+}
+
+func TestDaemonHelperProcess(t *testing.T) {
+	if os.Getenv("OFFBEAT_DAEMON_HELPER") != "1" {
+		return
+	}
+	d, err := NewDaemon(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
 

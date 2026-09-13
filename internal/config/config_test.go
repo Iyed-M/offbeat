@@ -54,6 +54,25 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadUsesProvidedHomeForDefaultConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".config", AppDirName)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[logging]\nlevel = \"debug\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewLoader(dir, "").Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Fatalf("Logging.Level=%q want debug", cfg.Logging.Level)
+	}
+}
+
 func TestLoadTOML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")

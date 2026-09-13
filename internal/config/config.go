@@ -115,7 +115,11 @@ func DefaultConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", AppDirName, "config.toml"), nil
+	return ConfigPath(home), nil
+}
+
+func ConfigPath(home string) string {
+	return filepath.Join(home, ".config", AppDirName, "config.toml")
 }
 
 func fileExists(p string) bool {
@@ -149,11 +153,7 @@ func (l *Loader) Load() (Config, error) {
 	}
 	cfg := Defaults(home)
 	if l.configPath == "" {
-		cp, err := DefaultConfigPath()
-		if err != nil {
-			return cfg, err
-		}
-		l.configPath = cp
+		l.configPath = ConfigPath(home)
 	}
 	if fileExists(l.configPath) {
 		if err := applyTOMLFromPath(l.configPath, &cfg); err != nil {

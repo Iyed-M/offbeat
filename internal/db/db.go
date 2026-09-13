@@ -71,6 +71,14 @@ func LoadMigrations(src Source, dir string) ([]Migration, error) {
 		out = append(out, Migration{Version: v, Name: name, SQL: string(data)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	for i, migration := range out {
+		if migration.Version <= 0 {
+			return nil, fmt.Errorf("migration %q has non-positive version %d", migration.Name, migration.Version)
+		}
+		if i > 0 && migration.Version == out[i-1].Version {
+			return nil, fmt.Errorf("duplicate migration version %d", migration.Version)
+		}
+	}
 	return out, nil
 }
 
