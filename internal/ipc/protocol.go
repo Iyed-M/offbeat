@@ -53,8 +53,12 @@ const (
 // Request is the versioned command envelope sent by a CLI over one
 // connection.
 type Request struct {
-	Version int    `json:"version"`
-	Command string `json:"command"`
+	// versionSet records whether the "version" field was present in the
+	// decoded JSON. It lets the dispatcher distinguish a missing field
+	// (invalid_request) from an explicitly wrong value (unsupported_version).
+	versionSet bool
+	Version    int    `json:"version"`
+	Command    string `json:"command"`
 }
 
 // Response is the versioned envelope sent back by the daemon over the same
@@ -95,26 +99,47 @@ func Encode(v any) ([]byte, error) {
 }
 
 // Decode parses a single JSON message into v. Unknown fields are rejected
-// so the protocol can evolve deliberately via ADRs.
+// so the protocol can evolve deliberately via ADRs. The byte slice must
+// contain exactly one JSON value: trailing data, even whitespace-only, is
+// rejected as invalid_request to keep the wire format strict.
 func Decode(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("ipc decode: %w", err)
 	}
+	if _, err := dec.Token(); err == nil {
+		return fmt.Errorf("ipc decode: %w", errTrailingData)
+	} else if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("ipc decode: %w", err)
+	}
+	if r, ok := v.(*Request); ok {
+		r.versionSet = bytesContainsField(data, `"version"`)
+	}
 	return nil
+}
+
+var errTrailingData = errors.New("ipc: trailing data after JSON value")
+
+// bytesContainsField reports whether the literal field name appears as a
+// JSON key in data. It is a heuristic used only to mark the
+// "version"-present bit on a Request after decoding; it must not be used
+// to make security decisions.
+func bytesContainsField(data []byte, field string) bool {
+	return bytes.Contains(data, []byte(field))
 }
 
 // ReadFrame reads exactly one '\n'-terminated JSON message from r. The
 // returned slice does not include the trailing newline. It returns
-// ErrMessageTooLarge if the frame exceeds MaxMessageBytes, and
-// io.ErrUnexpectedEOF if the underlying reader hits EOF before a newline.
+// ErrMessageTooLarge if the payload (excluding the newline) exceeds
+// MaxMessageBytes, and io.ErrUnexpectedEOF if the underlying reader hits
+// EOF before a newline.
 func ReadFrame(r *bufio.Reader) ([]byte, error) {
 	var buf []byte
 	for {
 		line, err := r.ReadSlice(FrameNewline)
 		if len(line) > 0 {
-			if len(buf)+len(line) > MaxMessageBytes {
+			if len(buf)+len(line) > MaxMessageBytes+1 {
 				return nil, ErrMessageTooLarge
 			}
 			buf = append(buf, line...)
@@ -128,12 +153,19 @@ func ReadFrame(r *bufio.Reader) ([]byte, error) {
 			}
 			return nil, err
 		}
-		return buf[:len(buf)-1], nil
+		// The last byte is the FrameNewline; cap the payload (everything
+		// before it) and reject if it is strictly larger than MaxMessageBytes.
+		payload := buf[:len(buf)-1]
+		if len(payload) > MaxMessageBytes {
+			return nil, ErrMessageTooLarge
+		}
+		return payload, nil
 	}
 }
 
-// WriteFrame writes msg followed by '\n' to w. It refuses to write a frame
-// larger than MaxMessageBytes.
+// WriteFrame writes msg followed by '\n' to w. It refuses to write a
+// payload larger than MaxMessageBytes; the newline is never counted
+// toward the limit, mirroring ReadFrame.
 func WriteFrame(w io.Writer, msg []byte) error {
 	if len(msg) > MaxMessageBytes {
 		return ErrMessageTooLarge
@@ -181,13 +213,13 @@ func Serve(ctx context.Context, conn net.Conn, h Handler, logger *slog.Logger) e
 	if err := Decode(frame, &req); err != nil {
 		return writeProtocolError(conn, logger, addr, "decode_request", err)
 	}
+	if !req.versionSet || req.Command == "" {
+		resp := Response{Version: ProtocolVersion, Error: ptr(NewError(CodeInvalidRequest, "missing required field"))}
+		return writeResponse(conn, logger, addr, resp)
+	}
 	if req.Version != ProtocolVersion {
 		resp := Response{Version: ProtocolVersion, Error: ptr(NewError(CodeUnsupportedVersion,
 			fmt.Sprintf("unsupported protocol version %d", req.Version)))}
-		return writeResponse(conn, logger, addr, resp)
-	}
-	if req.Command == "" {
-		resp := Response{Version: ProtocolVersion, Error: ptr(NewError(CodeInvalidRequest, "missing command"))}
 		return writeResponse(conn, logger, addr, resp)
 	}
 

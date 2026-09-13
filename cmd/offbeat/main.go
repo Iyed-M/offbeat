@@ -36,15 +36,24 @@ func main() {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "status":
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "offbeat: 'status' takes no arguments (got %v)\n", rest)
+			fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
+			os.Exit(2)
+		}
 		os.Exit(runStatus(configPath, homeDir))
 	case "config":
+		if len(rest) > 0 {
+			fmt.Fprintf(os.Stderr, "offbeat: 'config' takes no arguments (got %v)\n", rest)
+			fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
+			os.Exit(2)
+		}
 		os.Exit(runConfig(configPath, homeDir))
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
 		os.Exit(2)
 	}
-	_ = rest
 }
 
 func printHelp() {

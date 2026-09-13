@@ -55,7 +55,7 @@ func TestEncodeDecodeRequestRoundTrip(t *testing.T) {
 	if err := ipc.Decode(data, &got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got != req {
+	if got.Version != req.Version || got.Command != req.Command {
 		t.Fatalf("got %+v want %+v", got, req)
 	}
 }
@@ -77,6 +77,54 @@ func TestDecodeRejectsUnknownFields(t *testing.T) {
 	err := ipc.Decode(payload, &req)
 	if err == nil {
 		t.Fatal("expected error for unknown field, got nil")
+	}
+}
+
+func TestDecodeRejectsMissingVersion(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	go func() {
+		_ = ipc.Serve(context.Background(), server, func(context.Context, ipc.Request) (any, error) {
+			t.Errorf("handler must not be called for missing version")
+			return nil, nil
+		}, nil)
+	}()
+
+	if _, err := client.Write([]byte(`{"command":"status"}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp := mustReadResponse(t, client)
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("got code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestDecodeRejectsTrailingJSONValue(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	go func() {
+		_ = ipc.Serve(context.Background(), server, func(context.Context, ipc.Request) (any, error) {
+			t.Errorf("handler must not be called when extra JSON follows the request")
+			return nil, nil
+		}, nil)
+	}()
+
+	if _, err := client.Write([]byte(`{"version":1,"command":"status"} {}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp := mustReadResponse(t, client)
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("got code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
 	}
 }
 
@@ -146,7 +194,7 @@ func TestReadFrameReadsSingleLine(t *testing.T) {
 }
 
 func TestReadFrameRejectsMessageLargerThanMax(t *testing.T) {
-	big := strings.Repeat("a", ipc.MaxMessageBytes)
+	big := strings.Repeat("a", ipc.MaxMessageBytes+1)
 	r := bufio.NewReader(strings.NewReader(big + "\n"))
 	_, err := ipc.ReadFrame(r)
 	if err == nil {
@@ -172,6 +220,26 @@ func TestWriteFrameAppendsNewline(t *testing.T) {
 	}
 	if got := buf.String(); got != `{"x":1}`+"\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestFrameBoundaryIsConsistentAcrossReadAndWrite(t *testing.T) {
+	payload := make([]byte, ipc.MaxMessageBytes)
+	for i := range payload {
+		payload[i] = 'a'
+	}
+
+	var buf strings.Builder
+	if err := ipc.WriteFrame(&buf, payload); err != nil {
+		t.Fatalf("WriteFrame at boundary: %v", err)
+	}
+	if _, err := ipc.ReadFrame(bufio.NewReader(strings.NewReader(buf.String()))); err != nil {
+		t.Fatalf("ReadFrame at boundary: %v", err)
+	}
+
+	oversize := make([]byte, ipc.MaxMessageBytes+1)
+	if err := ipc.WriteFrame(&buf, oversize); !errors.Is(err, ipc.ErrMessageTooLarge) {
+		t.Fatalf("WriteFrame over limit err=%v want ErrMessageTooLarge", err)
 	}
 }
 

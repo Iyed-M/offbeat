@@ -138,9 +138,29 @@ func TestCLIStatusUnknownCommandExitsTwo(t *testing.T) {
 	}
 }
 
-func runCLI(t *testing.T, home, subcommand string) (string, string, error) {
+func TestCLIStatusRejectsExtraPositionalArgs(t *testing.T) {
+	home := t.TempDir()
+
+	out, errOut, err := runCLI(t, home, "status", "extra")
+	if err == nil {
+		t.Fatalf("expected error exit, got success\nstdout:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code=%d want 2", exitErr.ExitCode())
+	}
+	if !strings.Contains(errOut, "usage") {
+		t.Errorf("stderr missing usage hint: %q", errOut)
+	}
+}
+
+func runCLI(t *testing.T, home, subcommand string, extraArgs ...string) (string, string, error) {
 	t.Helper()
-	cmd := exec.Command(offbeatPath, "-home", home, subcommand)
+	args := append([]string{"-home", home, subcommand}, extraArgs...)
+	cmd := exec.Command(offbeatPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
