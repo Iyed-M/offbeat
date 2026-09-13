@@ -284,6 +284,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 	switch req.Command {
 	case "status":
 		return d.handleStatus(ctx)
+	case "config":
+		return d.handleConfig(ctx)
 	default:
 		return nil, ipc.NewError(ipc.CodeInvalidRequest,
 			fmt.Sprintf("unknown command %q", req.Command))
@@ -307,6 +309,41 @@ func (d *Daemon) handleStatus(ctx context.Context) (any, error) {
 		DBReady:       true,
 		SchemaVersion: schemaVersion,
 	}, nil
+}
+
+// handleConfig returns the M1.3 config payload: the daemon's effective
+// configuration, sanitized through SanitizedConfig so secret values never
+// leave the daemon. It reports the in-memory config the daemon loaded at
+// startup; local file changes after startup are invisible until restart,
+// which is the property the CLI relies on.
+func (d *Daemon) handleConfig(_ context.Context) (any, error) {
+	return SanitizedConfig(d.Cfg), nil
+}
+
+// SanitizedConfig projects config.Config onto ipc.ConfigResult. It is the
+// single boundary through which configuration reaches the control
+// protocol: any field not represented on the result is omitted by
+// construction, which keeps secret additions to config.Config from
+// leaking silently. The v1 config has no secret fields, so today this is
+// a direct mapping.
+func SanitizedConfig(cfg config.Config) ipc.ConfigResult {
+	return ipc.ConfigResult{
+		Paths: ipc.ConfigPaths{
+			ConfigDir: cfg.Paths.ConfigDir,
+			DataDir:   cfg.Paths.DataDir,
+			StateDir:  cfg.Paths.StateDir,
+			CacheDir:  cfg.Paths.CacheDir,
+			MusicRoot: cfg.Paths.MusicRoot,
+			Database:  cfg.Paths.Database,
+			SocketDir: cfg.Paths.SocketDir,
+			CertsDir:  cfg.Paths.CertsDir,
+			LogFile:   cfg.Paths.LogFile,
+		},
+		AcquisitionConcurrency: cfg.Acquisition.Concurrency,
+		DownloaderYTDLPPath:    cfg.Downloader.YTDLPPath,
+		DownloaderFFmpegPath:   cfg.Downloader.FFmpegPath,
+		DownloaderFFprobePath:  cfg.Downloader.FFprobePath,
+	}
 }
 
 var ErrShutdown = errors.New("shutdown requested")

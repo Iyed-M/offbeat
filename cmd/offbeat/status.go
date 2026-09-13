@@ -16,6 +16,11 @@ import (
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
 
+const (
+	controlConnectTimeout = 2 * time.Second
+	controlReadTimeout    = 5 * time.Second
+)
+
 // runStatus connects to the daemon over its control socket, requests the
 // status payload, and renders it as human-readable text.
 //
@@ -32,7 +37,7 @@ func runStatus(configPath, homeDir string) int {
 
 	sockPath := app.SocketPath(cfg.Paths.SocketDir)
 
-	resp, err := requestStatus(sockPath, 2*time.Second, 5*time.Second)
+	resp, err := requestControl(sockPath, "status")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat status: daemon-unavailable: %v\n", err)
 		return 1
@@ -58,16 +63,16 @@ func runStatus(configPath, homeDir string) int {
 	return 0
 }
 
-// requestStatus opens the Unix socket, writes one status request, reads
-// one response, and closes the connection. It does not retry on failure
-// (ADR 0007).
+// requestControl opens the Unix socket, writes one request for the named
+// command, reads one response, and closes the connection. It does not
+// retry on failure (ADR 0007).
 //
 // Failures before the request bytes are fully written on the wire are
 // reported as daemon-unavailable. Failures after the request was sent on
 // the wire are reported as unknown-outcome because the daemon may have
 // received and acted on the request before the connection dropped.
-func requestStatus(sockPath string, connectTimeout, readTimeout time.Duration) (ipc.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+func requestControl(sockPath, command string) (ipc.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), controlConnectTimeout)
 	defer cancel()
 
 	var d net.Dialer
@@ -77,11 +82,11 @@ func requestStatus(sockPath string, connectTimeout, readTimeout time.Duration) (
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(readTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(controlReadTimeout)); err != nil {
 		return ipc.Response{}, fmt.Errorf("set deadline: %w", err)
 	}
 
-	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "status"}
+	req := ipc.Request{Version: ipc.ProtocolVersion, Command: command}
 	data, err := ipc.Encode(req)
 	if err != nil {
 		return ipc.Response{}, fmt.Errorf("encode request: %w", err)
