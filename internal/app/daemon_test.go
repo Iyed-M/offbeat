@@ -3,7 +3,9 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
+	"github.com/Iyed-M/offbeat/internal/ipc"
 )
 
 func TestNewDaemonCreatesDirsAndMigrates(t *testing.T) {
@@ -262,4 +265,207 @@ func TestDBMigrationsAreIdempotent(t *testing.T) {
 	if len(second) != 0 {
 		t.Fatalf("second migrate re-applied: %v", second)
 	}
+}
+
+func TestStatusCommandReportsDaemonIdentity(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1,"command":"status"}`+"\n"))
+	if resp.Error != nil {
+		t.Fatalf("got error %+v", resp.Error)
+	}
+
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("re-marshal result: %v", err)
+	}
+	var status ipc.StatusResult
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+
+	if status.DaemonVersion != "0.0.0-m1" {
+		t.Errorf("DaemonVersion=%q want %q", status.DaemonVersion, "0.0.0-m1")
+	}
+	if status.PID != os.Getpid() {
+		t.Errorf("PID=%d want %d", status.PID, os.Getpid())
+	}
+	if !status.DBReady {
+		t.Error("DBReady=false want true")
+	}
+	if status.SchemaVersion != 1 {
+		t.Errorf("SchemaVersion=%d want 1", status.SchemaVersion)
+	}
+	if status.StartedAt.IsZero() {
+		t.Error("StartedAt is zero")
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		t.Errorf("response version=%d want %d", resp.Version, ipc.ProtocolVersion)
+	}
+}
+
+func TestStatusCommandRejectsUnknownCommand(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1,"command":"nope"}`+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestStatusCommandRejectsMissingCommand(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1}`+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestStatusCommandRejectsUnsupportedVersion(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":99,"command":"status"}`+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeUnsupportedVersion {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeUnsupportedVersion)
+	}
+}
+
+func TestStatusCommandRejectsMalformedJSON(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte("{not json"+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestStatusCommandRejectsUnknownField(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1,"command":"status","extra":1}`+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestStatusCommandServesOneRequestPerConnection(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte(`{"version":1,"command":"status"}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	resp := mustReadResponse(t, conn)
+	if resp.Error != nil {
+		t.Fatalf("got error %+v", resp.Error)
+	}
+
+	// A second request on the same connection should fail: the daemon closes
+	// the connection after serving exactly one request.
+	if _, err := conn.Write([]byte(`{"version":1,"command":"status"}` + "\n")); err != nil {
+		// Some kernels return EPIPE here; that is acceptable.
+		return
+	}
+	if _, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil {
+		t.Fatal("expected second request to fail (daemon must close connection)")
+	}
+}
+
+func startDaemonForTest(t *testing.T, version string) *Daemon {
+	t.Helper()
+	dir := t.TempDir()
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, Version: version})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	done := make(chan error, 1)
+	sigCh := make(chan os.Signal, 1)
+	go func() {
+		done <- d.Run(context.Background(), RunOptions{SignalCh: sigCh})
+	}()
+	t.Cleanup(func() {
+		sigCh <- os.Interrupt
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("daemon did not exit after signal")
+		}
+	})
+	return d
+}
+
+func waitForSocket(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("socket %s never appeared", path)
+}
+
+func sendRaw(t *testing.T, sockPath string, payload []byte) ipc.Response {
+	t.Helper()
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return mustReadResponse(t, conn)
+}
+
+func mustReadResponse(t *testing.T, r net.Conn) ipc.Response {
+	t.Helper()
+	conn, err := bufio.NewReader(r).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var resp ipc.Response
+	if err := ipc.Decode(conn, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp
 }
