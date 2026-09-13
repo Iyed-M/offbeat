@@ -171,6 +171,23 @@ func (d *DB) appliedVersions(ctx context.Context) (map[int]struct{}, error) {
 	return out, rows.Err()
 }
 
+// SchemaVersion returns the highest applied migration version, or 0 when
+// no migrations have been applied. It is safe to call before Migrate:
+// the schema_migrations bookkeeping table is created on demand.
+func SchemaVersion(ctx context.Context, d *DB) (int, error) {
+	if _, err := d.ExecContext(ctx, MigrationsTableSchema); err != nil {
+		return 0, fmt.Errorf("ensure migrations table: %w", err)
+	}
+	var v sql.NullInt64
+	if err := d.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&v); err != nil {
+		return 0, fmt.Errorf("query max schema version: %w", err)
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return int(v.Int64), nil
+}
+
 func (d *DB) applyOne(ctx context.Context, m Migration) error {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {

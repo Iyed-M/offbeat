@@ -8,9 +8,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
+	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/logging"
 )
 
@@ -19,6 +21,9 @@ type Daemon struct {
 	Logger *slog.Logger
 	DB     *db.DB
 
+	startedAt time.Time
+	version   string
+
 	lock      *Lock
 	socketDir string
 }
@@ -26,6 +31,7 @@ type Daemon struct {
 type Options struct {
 	ConfigPath string
 	HomeDir    string
+	Version    string
 }
 
 func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
@@ -43,6 +49,8 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		Cfg:       cfg,
 		lock:      lock,
 		socketDir: cfg.Paths.SocketDir,
+		startedAt: time.Now().UTC(),
+		version:   opts.Version,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -192,7 +200,7 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
-		if err := acceptLoop(ctx, listener); err != nil {
+		if err := serveLoop(ctx, listener, d.handleControlRequest, d.Logger); err != nil {
 			acceptErr = err
 		}
 	}()
@@ -243,9 +251,11 @@ func (d *Daemon) shutdown(cause error) error {
 	return cause
 }
 
-// acceptLoop is the placeholder M1.1 serve loop: accept a connection and close it
-// immediately. The IPC protocol arrives in M1.2.
-func acceptLoop(ctx context.Context, listener net.Listener) error {
+// serveLoop accepts one connection at a time and dispatches each request
+// through the versioned JSON Lines control protocol. Each connection is
+// served by its own goroutine; the connection is closed after exactly one
+// request–response exchange (per ADR 0002).
+func serveLoop(ctx context.Context, listener net.Listener, handler ipc.Handler, logger *slog.Logger) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -254,10 +264,49 @@ func acceptLoop(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		if err := conn.Close(); err != nil {
-			return fmt.Errorf("close accepted conn: %w", err)
-		}
+		go func(c net.Conn) {
+			defer func() {
+				if r := recover(); r != nil && logger != nil {
+					logger.Error("panic serving control connection", "err", r)
+				}
+			}()
+			if err := ipc.Serve(ctx, c, handler, logger); err != nil && logger != nil {
+				logger.Debug("control connection ended", "err", err)
+			}
+		}(conn)
 	}
+}
+
+// handleControlRequest dispatches a single decoded control request to the
+// matching command handler. Unknown commands return a structured
+// invalid_request error so the CLI can render them uniformly.
+func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any, error) {
+	switch req.Command {
+	case "status":
+		return d.handleStatus(ctx)
+	default:
+		return nil, ipc.NewError(ipc.CodeInvalidRequest,
+			fmt.Sprintf("unknown command %q", req.Command))
+	}
+}
+
+// handleStatus returns the M1.2 status payload: daemon identity, lifecycle
+// and database readiness. It does not touch any mutable daemon state.
+func (d *Daemon) handleStatus(ctx context.Context) (any, error) {
+	if d.DB == nil {
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "database not ready")
+	}
+	schemaVersion, err := db.SchemaVersion(ctx, d.DB)
+	if err != nil {
+		return nil, fmt.Errorf("read schema version: %w", err)
+	}
+	return ipc.StatusResult{
+		DaemonVersion: d.version,
+		PID:           os.Getpid(),
+		StartedAt:     d.startedAt,
+		DBReady:       true,
+		SchemaVersion: schemaVersion,
+	}, nil
 }
 
 var ErrShutdown = errors.New("shutdown requested")

@@ -28,6 +28,7 @@ func main() {
 	d, err := app.NewDaemon(context.Background(), app.Options{
 		ConfigPath: configPath,
 		HomeDir:    homeDir,
+		Version:    version,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeatd: %v\n", err)
