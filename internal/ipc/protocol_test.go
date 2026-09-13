@@ -104,6 +104,54 @@ func TestDecodeRejectsMissingVersion(t *testing.T) {
 	}
 }
 
+func TestDecodeRejectsMissingVersionWhenCommandValueIsVersion(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	go func() {
+		_ = ipc.Serve(context.Background(), server, func(context.Context, ipc.Request) (any, error) {
+			t.Errorf("handler must not be called for missing version")
+			return nil, nil
+		}, nil)
+	}()
+
+	if _, err := client.Write([]byte(`{"command":"version"}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp := mustReadResponse(t, client)
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("got code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestDecodeRejectsNullVersion(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	go func() {
+		_ = ipc.Serve(context.Background(), server, func(context.Context, ipc.Request) (any, error) {
+			t.Errorf("handler must not be called for null version")
+			return nil, nil
+		}, nil)
+	}()
+
+	if _, err := client.Write([]byte(`{"version":null,"command":"status"}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	resp := mustReadResponse(t, client)
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("got code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
 func TestDecodeRejectsTrailingJSONValue(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })

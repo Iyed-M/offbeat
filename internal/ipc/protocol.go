@@ -53,12 +53,54 @@ const (
 // Request is the versioned command envelope sent by a CLI over one
 // connection.
 type Request struct {
-	// versionSet records whether the "version" field was present in the
-	// decoded JSON. It lets the dispatcher distinguish a missing field
-	// (invalid_request) from an explicitly wrong value (unsupported_version).
+	// versionSet records that strict JSON decoding validated the required
+	// version field. It lets the dispatcher distinguish an invalid request
+	// from an explicitly unsupported version.
 	versionSet bool
 	Version    int    `json:"version"`
 	Command    string `json:"command"`
+}
+
+// UnmarshalJSON strictly validates the request envelope before making it
+// available to the dispatcher. json.Decoder's DisallowUnknownFields does not
+// apply within a custom unmarshaller, so unknown fields are rejected here.
+func (r *Request) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		if name != "version" && name != "command" {
+			return fmt.Errorf("unknown request field %q", name)
+		}
+	}
+
+	version, ok := fields["version"]
+	if !ok || isJSONNull(version) {
+		return errors.New("missing required field \"version\"")
+	}
+	var parsedVersion int
+	if err := json.Unmarshal(version, &parsedVersion); err != nil {
+		return fmt.Errorf("decode version: %w", err)
+	}
+
+	command, ok := fields["command"]
+	if !ok || isJSONNull(command) {
+		return errors.New("missing required field \"command\"")
+	}
+	var parsedCommand string
+	if err := json.Unmarshal(command, &parsedCommand); err != nil {
+		return fmt.Errorf("decode command: %w", err)
+	}
+
+	r.versionSet = true
+	r.Version = parsedVersion
+	r.Command = parsedCommand
+	return nil
+}
+
+func isJSONNull(data []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(data), []byte("null"))
 }
 
 // Response is the versioned envelope sent back by the daemon over the same
@@ -100,8 +142,7 @@ func Encode(v any) ([]byte, error) {
 
 // Decode parses a single JSON message into v. Unknown fields are rejected
 // so the protocol can evolve deliberately via ADRs. The byte slice must
-// contain exactly one JSON value: trailing data, even whitespace-only, is
-// rejected as invalid_request to keep the wire format strict.
+// contain exactly one JSON value; trailing non-whitespace data is rejected.
 func Decode(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -113,21 +154,10 @@ func Decode(data []byte, v any) error {
 	} else if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("ipc decode: %w", err)
 	}
-	if r, ok := v.(*Request); ok {
-		r.versionSet = bytesContainsField(data, `"version"`)
-	}
 	return nil
 }
 
 var errTrailingData = errors.New("ipc: trailing data after JSON value")
-
-// bytesContainsField reports whether the literal field name appears as a
-// JSON key in data. It is a heuristic used only to mark the
-// "version"-present bit on a Request after decoding; it must not be used
-// to make security decisions.
-func bytesContainsField(data []byte, field string) bool {
-	return bytes.Contains(data, []byte(field))
-}
 
 // ReadFrame reads exactly one '\n'-terminated JSON message from r. The
 // returned slice does not include the trailing newline. It returns
