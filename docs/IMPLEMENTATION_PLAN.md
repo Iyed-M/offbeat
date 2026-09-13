@@ -1,4 +1,4 @@
-# Localify v1 — SMART Implementation Plan
+# Offbeat v1 — SMART Implementation Plan
 
 ## 1. Planning Principles
 
@@ -451,7 +451,7 @@ SpotifyTrackAssetMapping
 Managed root:
 
 ```text
-~/Music/Localify/
+~/Music/Offbeat/
 ├── tracks/
 └── playlists/
 ```
@@ -771,7 +771,7 @@ Implement:
 * immediate desired-state removal;
 * asset reference counting;
 * physical deletion only at zero references;
-* deferral while Localify operation actively uses file;
+* deferral while Offbeat operation actively uses file;
 * lightweight existence checks;
 * automatic reacquisition when appropriate;
 * `offbeat verify`.
@@ -1026,7 +1026,7 @@ Android instrumentation test for pairing flow where practical.
 
 ## Completion gate
 
-A physical Android device can discover/pair with Localify and persist its identity across app restart.
+A physical Android device can discover/pair with Offbeat and persist its identity across app restart.
 
 ---
 
@@ -1051,7 +1051,7 @@ Android app must:
 5. download required files;
 6. resume transfers;
 7. verify SHA-256;
-8. publish into `Music/Localify/`;
+8. publish into `Music/Offbeat/`;
 9. remove obsolete managed files;
 10. write playlists last;
 11. save committed revision.
@@ -1076,7 +1076,7 @@ On a physical Android device:
 
 ```text
 tap Sync now
-→ files appear under Music/Localify
+→ files appear under Music/Offbeat
 → M3U8 playlists appear
 → third-party player can play them offline
 ```
@@ -1113,7 +1113,7 @@ Test scheduling state transitions.
 
 ## Completion gate
 
-After desktop revision changes, the Android device eventually reaches the latest state without manually opening Spotify or Localify Android, subject to Android background scheduling behavior.
+After desktop revision changes, the Android device eventually reaches the latest state without manually opening Spotify or Offbeat Android, subject to Android background scheduling behavior.
 
 ---
 
@@ -1258,7 +1258,7 @@ Every coding-agent task should be limited to one milestone or a smaller subtask.
 Do not prompt:
 
 ```text
-Implement Localify.
+Implement Offbeat.
 ```
 
 Prefer:
@@ -1540,7 +1540,7 @@ A milestone that fails its completion gate does not unlock dependent milestones.
 
 # 31. Final Release Gate
 
-Localify v1 is releasable only when all of the following are true:
+Offbeat v1 is releasable only when all of the following are true:
 
 ```text
 [ ] clean Linux setup succeeds

@@ -50,7 +50,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println("offbeat - Localify CLI (M0 skeleton)")
+	fmt.Println("offbeat - Offbeat CLI (M0 skeleton)")
 	fmt.Println()
 	fmt.Println("Usage: offbeat [flags] <command>")
 	fmt.Println()
