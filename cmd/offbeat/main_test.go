@@ -157,6 +157,199 @@ func TestCLIStatusRejectsExtraPositionalArgs(t *testing.T) {
 	}
 }
 
+func TestCLIConfigServesDaemonEffectiveConfig(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, ".config", "offbeat", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`
+[acquisition]
+concurrency = 4
+
+[downloader]
+yt_dlp_path = "/usr/local/bin/yt-dlp"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, offbeatdPath)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home)
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start offbeatd: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+	}()
+
+	if err := waitForDaemonReady(home, 5*time.Second); err != nil {
+		t.Fatalf("daemon not ready: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	out, errOut, err := runCLI(t, home, "config")
+	if err != nil {
+		t.Fatalf("offbeat config: %v\nstderr:\n%s", err, errOut)
+	}
+
+	for _, want := range []string{
+		"Offbeat configuration",
+		"paths:",
+		"music_root",
+		"socket_dir",
+		"acquisition:",
+		"concurrency        : 4",
+		"downloader:",
+		"yt_dlp_path  : /usr/local/bin/yt-dlp",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\noutput:\n%s", want, out)
+		}
+	}
+	if errOut != "" {
+		t.Errorf("unexpected stderr: %q", errOut)
+	}
+}
+
+// TestCLIConfigReflectsDaemonWhenLocalFileChanges is the acceptance
+// criterion: even after the local config file mutates underneath us,
+// `offbeat config` must report the daemon's effective configuration
+// (the value loaded at startup), not the freshly-written file.
+func TestCLIConfigReflectsDaemonWhenLocalFileChanges(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, ".config", "offbeat", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`
+[acquisition]
+concurrency = 4
+
+[downloader]
+yt_dlp_path = "/original/yt-dlp"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, offbeatdPath)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home)
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start offbeatd: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+	}()
+
+	if err := waitForDaemonReady(home, 5*time.Second); err != nil {
+		t.Fatalf("daemon not ready: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	// Mutate the file AFTER the daemon started. The socket_dir is left
+	// untouched so the CLI's bootstrap-config read still resolves the
+	// right socket.
+	if err := os.WriteFile(cfgPath, []byte(`
+[acquisition]
+concurrency = 8
+
+[downloader]
+yt_dlp_path = "/mutated/yt-dlp"
+`), 0o600); err != nil {
+		t.Fatalf("mutate config: %v", err)
+	}
+
+	out, errOut, err := runCLI(t, home, "config")
+	if err != nil {
+		t.Fatalf("offbeat config: %v\nstderr:\n%s", err, errOut)
+	}
+
+	if !strings.Contains(out, "concurrency        : 4") {
+		t.Errorf("expected daemon-served concurrency=4, got output:\n%s", out)
+	}
+	if !strings.Contains(out, "/original/yt-dlp") {
+		t.Errorf("expected daemon-served yt-dlp path, got output:\n%s", out)
+	}
+	if strings.Contains(out, "concurrency        : 8") {
+		t.Errorf("config leaked mutated concurrency=8:\n%s", out)
+	}
+	if strings.Contains(out, "/mutated/yt-dlp") {
+		t.Errorf("config leaked mutated yt-dlp path:\n%s", out)
+	}
+	if errOut != "" {
+		t.Errorf("unexpected stderr: %q", errOut)
+	}
+}
+
+func TestCLIConfigReportsDaemonUnavailableWhenNoDaemon(t *testing.T) {
+	home := t.TempDir()
+
+	out, errOut, err := runCLI(t, home, "config")
+	if err == nil {
+		t.Fatalf("expected error exit, got success\nstdout:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code=%d want 1", exitErr.ExitCode())
+	}
+	if !strings.Contains(errOut, "daemon-unavailable") {
+		t.Errorf("stderr missing 'daemon-unavailable': %q", errOut)
+	}
+	// The error must mention config so the user can act on it.
+	if !strings.Contains(errOut, "offbeat config") {
+		t.Errorf("stderr missing 'offbeat config' prefix: %q", errOut)
+	}
+	// It must not silently fall back to a local file render: stdout
+	// should be empty so the user is not misled into believing the
+	// daemon is the source.
+	if out != "" {
+		t.Errorf("expected empty stdout on failure, got: %q", out)
+	}
+}
+
+func TestCLIConfigRejectsExtraPositionalArgs(t *testing.T) {
+	home := t.TempDir()
+
+	out, errOut, err := runCLI(t, home, "config", "extra")
+	if err == nil {
+		t.Fatalf("expected error exit, got success\nstdout:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected ExitError, got %v", err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code=%d want 2", exitErr.ExitCode())
+	}
+	if !strings.Contains(errOut, "usage") {
+		t.Errorf("stderr missing usage hint: %q", errOut)
+	}
+}
+
+func TestDecodeConfigResultRejectsInvalidDaemonReply(t *testing.T) {
+	for _, result := range []any{
+		nil,
+		map[string]any{},
+		map[string]any{"unknown": "field"},
+	} {
+		if _, err := decodeConfigResult(result); err == nil {
+			t.Errorf("decodeConfigResult(%#v) succeeded", result)
+		}
+	}
+}
+
 func runCLI(t *testing.T, home, subcommand string, extraArgs ...string) (string, string, error) {
 	t.Helper()
 	args := append([]string{"-home", home, subcommand}, extraArgs...)

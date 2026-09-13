@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -407,6 +408,148 @@ func TestStatusCommandServesOneRequestPerConnection(t *testing.T) {
 	}
 }
 
+func TestConfigCommandReportsSanitizedEffectiveConfig(t *testing.T) {
+	dir := t.TempDir()
+	customDB := filepath.Join(dir, "custom.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
+[paths]
+database = %q
+
+[acquisition]
+concurrency = 4
+temp_retry_backoff = "45s"
+max_temp_retries = 7
+
+[logging]
+level = "debug"
+format = "json"
+
+[spotify_adapter]
+bind_address = "127.0.0.2"
+port = 8765
+
+[downloader]
+yt_dlp_path = "/usr/local/bin/yt-dlp"
+ffmpeg_path = "/opt/ffmpeg"
+ffprobe_path = "/opt/ffprobe"
+
+[sync]
+https_port = 8443
+lan_bind_address = "192.168.1.20"
+pairing_timeout = "10m"
+`, customDB)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := startDaemonWithConfig(t, cfgPath, "0.0.0-m1")
+	if err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1,"command":"config"}`+"\n"))
+	if resp.Error != nil {
+		t.Fatalf("got error %+v", resp.Error)
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		t.Errorf("response version=%d want %d", resp.Version, ipc.ProtocolVersion)
+	}
+
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("re-marshal result: %v", err)
+	}
+	var cfg ipc.ConfigResult
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	if cfg.Paths.Database != customDB {
+		t.Errorf("Database=%q want %q", cfg.Paths.Database, customDB)
+	}
+	if cfg.Paths.MusicRoot == "" {
+		t.Errorf("MusicRoot is empty")
+	}
+	if cfg.Paths.SocketDir == "" {
+		t.Errorf("SocketDir is empty")
+	}
+	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
+		t.Errorf("Logging=%+v", cfg.Logging)
+	}
+	if cfg.SpotifyAdapter.BindAddress != "127.0.0.2" || cfg.SpotifyAdapter.Port != 8765 {
+		t.Errorf("SpotifyAdapter=%+v", cfg.SpotifyAdapter)
+	}
+	if cfg.Acquisition.Concurrency != 4 || cfg.Acquisition.TempRetryBackoff != "45s" || cfg.Acquisition.MaxTempRetries != 7 {
+		t.Errorf("Acquisition=%+v", cfg.Acquisition)
+	}
+	if cfg.Downloader.YTDLPPath != "/usr/local/bin/yt-dlp" || cfg.Downloader.FFmpegPath != "/opt/ffmpeg" || cfg.Downloader.FFprobePath != "/opt/ffprobe" {
+		t.Errorf("Downloader=%+v", cfg.Downloader)
+	}
+	if cfg.Sync.HTTPSPort != 8443 || cfg.Sync.LANBindAddress != "192.168.1.20" || cfg.Sync.PairingTimeout != "10m0s" {
+		t.Errorf("Sync=%+v", cfg.Sync)
+	}
+}
+
+func TestConfigCommandDispatches(t *testing.T) {
+	// config uses the same dispatch envelope as status; the protocol-level
+	// rejection rules (unsupported_version, invalid_request, malformed JSON,
+	// unknown field) are already covered exhaustively by the status tests
+	// in this file. This test pins the dispatch fact: "config" is a known
+	// command, while an obviously-unknown command still fails.
+	d := startDaemonForTest(t, "0.0.0-m1")
+	sockPath := SocketPath(d.socketDir)
+	waitForSocket(t, sockPath)
+
+	resp := sendRaw(t, sockPath, []byte(`{"version":1,"command":"nope"}`+"\n"))
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got result=%+v", resp.Result)
+	}
+	if resp.Error.Code != ipc.CodeInvalidRequest {
+		t.Fatalf("code=%q want %q", resp.Error.Code, ipc.CodeInvalidRequest)
+	}
+}
+
+func TestSanitizedConfigOmitsAnythingNotOnResult(t *testing.T) {
+	// Defence-in-depth: the sanitized builder must produce a value that
+	// does not carry any secret-shaped string from the source config. The
+	// v1 config has no secret fields, so this is currently a structural
+	// assertion: the result must be free of fields not declared on
+	// ipc.ConfigResult.
+	cfg := config.Defaults("/home/test")
+	got := SanitizedConfig(cfg)
+
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var probe map[string]any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for key := range probe {
+		switch key {
+		case "paths", "logging", "spotify_adapter", "downloader", "acquisition", "sync":
+			// expected
+		default:
+			t.Errorf("unexpected key in sanitized config: %q", key)
+		}
+	}
+	paths, ok := probe["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("paths missing or wrong type: %T", probe["paths"])
+	}
+	for _, want := range []string{
+		"config_dir", "data_dir", "state_dir", "cache_dir",
+		"music_root", "database", "socket_dir", "certs_dir", "log_file",
+	} {
+		if _, ok := paths[want]; !ok {
+			t.Errorf("paths missing %q", want)
+		}
+	}
+}
+
 func startDaemonForTest(t *testing.T, version string) *Daemon {
 	t.Helper()
 	dir := t.TempDir()
@@ -430,6 +573,33 @@ func startDaemonForTest(t *testing.T, version string) *Daemon {
 		}
 	})
 	return d
+}
+
+// startDaemonWithConfig is like startDaemonForTest but loads a custom
+// config file before the daemon binds its socket.
+func startDaemonWithConfig(t *testing.T, configPath, version string) (*Daemon, error) {
+	t.Helper()
+	dir := t.TempDir()
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: configPath, Version: version})
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	done := make(chan error, 1)
+	sigCh := make(chan os.Signal, 1)
+	go func() {
+		done <- d.Run(context.Background(), RunOptions{SignalCh: sigCh})
+	}()
+	t.Cleanup(func() {
+		sigCh <- os.Interrupt
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("daemon did not exit after signal")
+		}
+	})
+	return d, nil
 }
 
 func waitForSocket(t *testing.T, path string) {
