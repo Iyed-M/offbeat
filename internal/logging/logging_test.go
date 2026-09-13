@@ -3,6 +3,9 @@ package logging
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -54,22 +57,30 @@ func TestParseFormat(t *testing.T) {
 	}
 }
 
-func TestNewJSONLogger(t *testing.T) {
+func mustLogger(t *testing.T, cfg Config) (*slog.Logger, *bytes.Buffer) {
+	t.Helper()
 	var buf bytes.Buffer
-	logger := New(Config{Level: LevelInfo, Format: FormatJSON, Writer: &buf})
-	logger.Info("hello", "k", "v")
-	out := buf.String()
-	if !strings.Contains(out, `"msg":"hello"`) {
-		t.Fatalf("missing msg in JSON output: %q", out)
+	cfg.Writer = &buf
+	logger, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if !strings.Contains(out, `"k":"v"`) {
-		t.Fatalf("missing kv in JSON output: %q", out)
+	return logger, &buf
+}
+
+func TestNewJSONLogger(t *testing.T) {
+	logger, buf := mustLogger(t, Config{Level: LevelInfo, Format: FormatJSON})
+	logger.Info("hello", "k", "v")
+	if !strings.Contains(buf.String(), `"msg":"hello"`) {
+		t.Fatalf("missing msg in JSON output: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"k":"v"`) {
+		t.Fatalf("missing kv in JSON output: %q", buf.String())
 	}
 }
 
 func TestNewTextLogger(t *testing.T) {
-	var buf bytes.Buffer
-	logger := New(Config{Level: LevelDebug, Format: FormatText, Writer: &buf})
+	logger, buf := mustLogger(t, Config{Level: LevelDebug, Format: FormatText})
 	logger.Debug("hi")
 	if !strings.Contains(buf.String(), "hi") {
 		t.Fatalf("expected hi in text output: %q", buf.String())
@@ -77,8 +88,7 @@ func TestNewTextLogger(t *testing.T) {
 }
 
 func TestNewLevelFiltering(t *testing.T) {
-	var buf bytes.Buffer
-	logger := New(Config{Level: LevelWarn, Format: FormatJSON, Writer: &buf})
+	logger, buf := mustLogger(t, Config{Level: LevelWarn, Format: FormatJSON})
 	logger.Info("should-be-filtered")
 	logger.Warn("should-appear")
 	out := buf.String()
@@ -91,8 +101,7 @@ func TestNewLevelFiltering(t *testing.T) {
 }
 
 func TestLoggerIsJSON(t *testing.T) {
-	var buf bytes.Buffer
-	logger := New(Config{Level: LevelInfo, Format: FormatJSON, Writer: &buf})
+	logger, buf := mustLogger(t, Config{Level: LevelInfo, Format: FormatJSON})
 	logger.Info("x")
 	var m map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &m); err != nil {
@@ -100,5 +109,28 @@ func TestLoggerIsJSON(t *testing.T) {
 	}
 	if m["msg"] != "x" {
 		t.Fatalf("msg=%v", m["msg"])
+	}
+}
+
+func TestNewWithFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "offbeatd.log")
+	logger, err := New(Config{Level: LevelInfo, Format: FormatJSON, File: logPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("file-test", "k", "v")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), `"msg":"file-test"`) {
+		t.Fatalf("expected msg in log file: %q", data)
+	}
+}
+
+func TestNewWithBadFile(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "missing-dir", "x.log")
+	if _, err := New(Config{Level: LevelInfo, Format: FormatJSON, File: bad}); err == nil {
+		t.Fatal("expected error opening log file in missing directory")
 	}
 }

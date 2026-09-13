@@ -163,6 +163,55 @@ func TestRunRespondsToContextCancel(t *testing.T) {
 	}
 }
 
+func TestRunReleasesOwnershipAfterStaleSocketResolutionFailure(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if err := os.WriteFile(SocketPath(d.socketDir), []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("create non-socket entry: %v", err)
+	}
+
+	if err := d.Run(context.Background(), RunOptions{SignalCh: make(chan os.Signal)}); !errors.Is(err, ErrNonSocketAtSocketPath) {
+		t.Fatalf("Run error = %v, want ErrNonSocketAtSocketPath", err)
+	}
+	assertResourcesReleased(t, d)
+}
+
+func TestRunReleasesOwnershipAfterSocketBindFailure(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if err := os.Remove(d.socketDir); err != nil {
+		t.Fatalf("remove socket dir: %v", err)
+	}
+
+	if err := d.Run(context.Background(), RunOptions{SignalCh: make(chan os.Signal)}); err == nil {
+		t.Fatal("Run succeeded after socket directory removal")
+	}
+	assertResourcesReleased(t, d)
+}
+
+func assertResourcesReleased(t *testing.T, d *Daemon) {
+	t.Helper()
+	if d.DB != nil {
+		t.Fatal("database was not closed")
+	}
+	if d.lock != nil {
+		t.Fatal("daemon lock was not released")
+	}
+	lock, err := AcquireLock(d.Cfg.Paths.StateDir)
+	if err != nil {
+		t.Fatalf("ownership was not released: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release replacement lock: %v", err)
+	}
+}
+
 func TestEnsureDirsCreatesExpectedPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Defaults(dir)
