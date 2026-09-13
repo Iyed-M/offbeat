@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -61,19 +62,31 @@ type Config struct {
 	Level  Level
 	Format Format
 	Writer io.Writer
+	File   string
 }
 
-func New(cfg Config) *slog.Logger {
-	if cfg.Writer == nil {
-		cfg.Writer = os.Stderr
+func New(cfg Config) (*slog.Logger, error) {
+	var writers []io.Writer
+	if cfg.Writer != nil {
+		writers = append(writers, cfg.Writer)
+	} else {
+		writers = append(writers, os.Stderr)
 	}
+	if cfg.File != "" {
+		f, err := os.OpenFile(cfg.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open log file %s: %w", cfg.File, err)
+		}
+		writers = append(writers, f)
+	}
+	w := io.MultiWriter(writers...)
 	opts := &slog.HandlerOptions{Level: slog.Level(cfg.Level)}
 	var h slog.Handler
 	switch cfg.Format {
 	case FormatJSON:
-		h = slog.NewJSONHandler(cfg.Writer, opts)
+		h = slog.NewJSONHandler(w, opts)
 	default:
-		h = slog.NewTextHandler(cfg.Writer, opts)
+		h = slog.NewTextHandler(w, opts)
 	}
-	return slog.New(h)
+	return slog.New(h), nil
 }
