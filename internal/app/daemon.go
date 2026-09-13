@@ -339,10 +339,29 @@ func SanitizedConfig(cfg config.Config) ipc.ConfigResult {
 			CertsDir:  cfg.Paths.CertsDir,
 			LogFile:   cfg.Paths.LogFile,
 		},
-		AcquisitionConcurrency: cfg.Acquisition.Concurrency,
-		DownloaderYTDLPPath:    cfg.Downloader.YTDLPPath,
-		DownloaderFFmpegPath:   cfg.Downloader.FFmpegPath,
-		DownloaderFFprobePath:  cfg.Downloader.FFprobePath,
+		Logging: ipc.ConfigLogging{
+			Level:  cfg.Logging.Level,
+			Format: cfg.Logging.Format,
+		},
+		SpotifyAdapter: ipc.ConfigSpotifyAdapter{
+			BindAddress: cfg.SpotifyAdapter.BindAddress,
+			Port:        cfg.SpotifyAdapter.Port,
+		},
+		Downloader: ipc.ConfigDownloader{
+			YTDLPPath:   cfg.Downloader.YTDLPPath,
+			FFmpegPath:  cfg.Downloader.FFmpegPath,
+			FFprobePath: cfg.Downloader.FFprobePath,
+		},
+		Acquisition: ipc.ConfigAcquisition{
+			Concurrency:      cfg.Acquisition.Concurrency,
+			TempRetryBackoff: cfg.Acquisition.TempRetryBackoff.Std().String(),
+			MaxTempRetries:   cfg.Acquisition.MaxTempRetries,
+		},
+		Sync: ipc.ConfigSync{
+			HTTPSPort:      cfg.Sync.HTTPSPort,
+			LANBindAddress: cfg.Sync.LANBindAddress,
+			PairingTimeout: cfg.Sync.PairingTimeout.Std().String(),
+		},
 	}
 }
 

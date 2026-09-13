@@ -7,16 +7,14 @@ package ipc
 // configuration reaches the CLI. Adding a secret to config.Config is a
 // deliberate omission from ConfigResult, not an accidental leak.
 //
-// Mirrors the surface that the CLI previously rendered from a local file
-// (paths plus a few runtime knobs) so that the user-visible output of
-// `offbeat config` does not regress when the command moves off the file
-// and onto the control protocol.
+// It includes every non-secret setting in the current configuration.
 type ConfigResult struct {
-	Paths               ConfigPaths `json:"paths"`
-	AcquisitionConcurrency int       `json:"acquisition_concurrency"`
-	DownloaderYTDLPPath    string    `json:"downloader_yt_dlp_path"`
-	DownloaderFFmpegPath   string    `json:"downloader_ffmpeg_path"`
-	DownloaderFFprobePath  string    `json:"downloader_ffprobe_path"`
+	Paths          ConfigPaths          `json:"paths"`
+	Logging        ConfigLogging        `json:"logging"`
+	SpotifyAdapter ConfigSpotifyAdapter `json:"spotify_adapter"`
+	Downloader     ConfigDownloader     `json:"downloader"`
+	Acquisition    ConfigAcquisition    `json:"acquisition"`
+	Sync           ConfigSync           `json:"sync"`
 }
 
 // ConfigPaths is the path subset of ConfigResult. Mirrors config.Paths
@@ -32,4 +30,32 @@ type ConfigPaths struct {
 	SocketDir string `json:"socket_dir"`
 	CertsDir  string `json:"certs_dir"`
 	LogFile   string `json:"log_file"`
+}
+
+type ConfigLogging struct {
+	Level  string `json:"level"`
+	Format string `json:"format"`
+}
+
+type ConfigSpotifyAdapter struct {
+	BindAddress string `json:"bind_address"`
+	Port        int    `json:"port"`
+}
+
+type ConfigDownloader struct {
+	YTDLPPath   string `json:"yt_dlp_path"`
+	FFmpegPath  string `json:"ffmpeg_path"`
+	FFprobePath string `json:"ffprobe_path"`
+}
+
+type ConfigAcquisition struct {
+	Concurrency      int    `json:"concurrency"`
+	TempRetryBackoff string `json:"temp_retry_backoff"`
+	MaxTempRetries   int    `json:"max_temp_retries"`
+}
+
+type ConfigSync struct {
+	HTTPSPort      int    `json:"https_port"`
+	LANBindAddress string `json:"lan_bind_address"`
+	PairingTimeout string `json:"pairing_timeout"`
 }

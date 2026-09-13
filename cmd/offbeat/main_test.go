@@ -203,7 +203,7 @@ yt_dlp_path = "/usr/local/bin/yt-dlp"
 		"music_root",
 		"socket_dir",
 		"acquisition:",
-		"concurrency : 4",
+		"concurrency        : 4",
 		"downloader:",
 		"yt_dlp_path  : /usr/local/bin/yt-dlp",
 	} {
@@ -273,13 +273,13 @@ yt_dlp_path = "/mutated/yt-dlp"
 		t.Fatalf("offbeat config: %v\nstderr:\n%s", err, errOut)
 	}
 
-	if !strings.Contains(out, "concurrency : 4") {
+	if !strings.Contains(out, "concurrency        : 4") {
 		t.Errorf("expected daemon-served concurrency=4, got output:\n%s", out)
 	}
 	if !strings.Contains(out, "/original/yt-dlp") {
 		t.Errorf("expected daemon-served yt-dlp path, got output:\n%s", out)
 	}
-	if strings.Contains(out, "concurrency : 8") {
+	if strings.Contains(out, "concurrency        : 8") {
 		t.Errorf("config leaked mutated concurrency=8:\n%s", out)
 	}
 	if strings.Contains(out, "/mutated/yt-dlp") {
@@ -335,6 +335,18 @@ func TestCLIConfigRejectsExtraPositionalArgs(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "usage") {
 		t.Errorf("stderr missing usage hint: %q", errOut)
+	}
+}
+
+func TestDecodeConfigResultRejectsInvalidDaemonReply(t *testing.T) {
+	for _, result := range []any{
+		nil,
+		map[string]any{},
+		map[string]any{"unknown": "field"},
+	} {
+		if _, err := decodeConfigResult(result); err == nil {
+			t.Errorf("decodeConfigResult(%#v) succeeded", result)
+		}
 	}
 }
 

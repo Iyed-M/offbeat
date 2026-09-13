@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,9 +32,24 @@ func runConfig(configPath, homeDir string) int {
 
 	sockPath := app.SocketPath(cfg.Paths.SocketDir)
 
-	result, err := requestConfig(sockPath)
+	resp, err := requestControl(sockPath, "config")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat config: daemon-unavailable: %v\n", err)
+		return 1
+	}
+	if resp.Error != nil {
+		fmt.Fprintf(os.Stderr, "offbeat config: daemon error: %s: %s\n",
+			resp.Error.Code, resp.Error.Message)
+		return 1
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		fmt.Fprintf(os.Stderr, "offbeat config: unexpected daemon reply: unsupported protocol version %d\n", resp.Version)
+		return 1
+	}
+
+	result, err := decodeConfigResult(resp.Result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat config: unexpected daemon reply: %v\n", err)
 		return 1
 	}
 
@@ -41,29 +57,30 @@ func runConfig(configPath, homeDir string) int {
 	return 0
 }
 
-// requestConfig opens the Unix socket, writes one config request, reads
-// one response, and closes the connection. It does not retry on failure
-// (ADR 0007). Failures before the request bytes are fully written on the
-// wire are reported as daemon-unavailable; failures after the request was
-// sent on the wire are reported as unknown-outcome.
-func requestConfig(sockPath string) (ipc.ConfigResult, error) {
-	resp, err := requestControl(sockPath, "config")
-	if err != nil {
-		return ipc.ConfigResult{}, err
-	}
-	if resp.Error != nil {
-		return ipc.ConfigResult{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-	}
-
-	raw, err := json.Marshal(resp.Result)
+func decodeConfigResult(result any) (ipc.ConfigResult, error) {
+	raw, err := json.Marshal(result)
 	if err != nil {
 		return ipc.ConfigResult{}, fmt.Errorf("unexpected daemon reply: %w", err)
 	}
-	var cfg ipc.ConfigResult
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var decoded *ipc.ConfigResult
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
 		return ipc.ConfigResult{}, fmt.Errorf("unexpected daemon reply: %w", err)
 	}
-	return cfg, nil
+	if decoded == nil {
+		return ipc.ConfigResult{}, fmt.Errorf("unexpected daemon reply: result is null")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return ipc.ConfigResult{}, fmt.Errorf("unexpected daemon reply: %w", err)
+	}
+	for _, field := range []string{"paths", "logging", "spotify_adapter", "downloader", "acquisition", "sync"} {
+		if _, ok := fields[field]; !ok {
+			return ipc.ConfigResult{}, fmt.Errorf("unexpected daemon reply: missing %q", field)
+		}
+	}
+	return *decoded, nil
 }
 
 // printConfig renders the ConfigResult as human-readable text. Mirrors
@@ -80,10 +97,22 @@ func printConfig(w io.Writer, c ipc.ConfigResult) {
 	fmt.Fprintf(w, "    socket_dir : %s\n", c.Paths.SocketDir)
 	fmt.Fprintf(w, "    certs_dir  : %s\n", c.Paths.CertsDir)
 	fmt.Fprintf(w, "    log_file   : %s\n", c.Paths.LogFile)
+	fmt.Fprintln(w, "  logging:")
+	fmt.Fprintf(w, "    level  : %s\n", c.Logging.Level)
+	fmt.Fprintf(w, "    format : %s\n", c.Logging.Format)
+	fmt.Fprintln(w, "  spotify_adapter:")
+	fmt.Fprintf(w, "    bind_address : %s\n", c.SpotifyAdapter.BindAddress)
+	fmt.Fprintf(w, "    port         : %d\n", c.SpotifyAdapter.Port)
 	fmt.Fprintln(w, "  acquisition:")
-	fmt.Fprintf(w, "    concurrency : %d\n", c.AcquisitionConcurrency)
+	fmt.Fprintf(w, "    concurrency        : %d\n", c.Acquisition.Concurrency)
+	fmt.Fprintf(w, "    temp_retry_backoff : %s\n", c.Acquisition.TempRetryBackoff)
+	fmt.Fprintf(w, "    max_temp_retries   : %d\n", c.Acquisition.MaxTempRetries)
 	fmt.Fprintln(w, "  downloader:")
-	fmt.Fprintf(w, "    yt_dlp_path  : %s\n", c.DownloaderYTDLPPath)
-	fmt.Fprintf(w, "    ffmpeg_path  : %s\n", c.DownloaderFFmpegPath)
-	fmt.Fprintf(w, "    ffprobe_path : %s\n", c.DownloaderFFprobePath)
+	fmt.Fprintf(w, "    yt_dlp_path  : %s\n", c.Downloader.YTDLPPath)
+	fmt.Fprintf(w, "    ffmpeg_path  : %s\n", c.Downloader.FFmpegPath)
+	fmt.Fprintf(w, "    ffprobe_path : %s\n", c.Downloader.FFprobePath)
+	fmt.Fprintln(w, "  sync:")
+	fmt.Fprintf(w, "    https_port       : %d\n", c.Sync.HTTPSPort)
+	fmt.Fprintf(w, "    lan_bind_address : %s\n", c.Sync.LANBindAddress)
+	fmt.Fprintf(w, "    pairing_timeout  : %s\n", c.Sync.PairingTimeout)
 }

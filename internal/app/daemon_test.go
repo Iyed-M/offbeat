@@ -418,11 +418,26 @@ database = %q
 
 [acquisition]
 concurrency = 4
+temp_retry_backoff = "45s"
+max_temp_retries = 7
+
+[logging]
+level = "debug"
+format = "json"
+
+[spotify_adapter]
+bind_address = "127.0.0.2"
+port = 8765
 
 [downloader]
 yt_dlp_path = "/usr/local/bin/yt-dlp"
 ffmpeg_path = "/opt/ffmpeg"
 ffprobe_path = "/opt/ffprobe"
+
+[sync]
+https_port = 8443
+lan_bind_address = "192.168.1.20"
+pairing_timeout = "10m"
 `, customDB)), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -460,17 +475,20 @@ ffprobe_path = "/opt/ffprobe"
 	if cfg.Paths.SocketDir == "" {
 		t.Errorf("SocketDir is empty")
 	}
-	if cfg.AcquisitionConcurrency != 4 {
-		t.Errorf("AcquisitionConcurrency=%d want 4", cfg.AcquisitionConcurrency)
+	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" {
+		t.Errorf("Logging=%+v", cfg.Logging)
 	}
-	if cfg.DownloaderYTDLPPath != "/usr/local/bin/yt-dlp" {
-		t.Errorf("YTDLPPath=%q", cfg.DownloaderYTDLPPath)
+	if cfg.SpotifyAdapter.BindAddress != "127.0.0.2" || cfg.SpotifyAdapter.Port != 8765 {
+		t.Errorf("SpotifyAdapter=%+v", cfg.SpotifyAdapter)
 	}
-	if cfg.DownloaderFFmpegPath != "/opt/ffmpeg" {
-		t.Errorf("FFmpegPath=%q", cfg.DownloaderFFmpegPath)
+	if cfg.Acquisition.Concurrency != 4 || cfg.Acquisition.TempRetryBackoff != "45s" || cfg.Acquisition.MaxTempRetries != 7 {
+		t.Errorf("Acquisition=%+v", cfg.Acquisition)
 	}
-	if cfg.DownloaderFFprobePath != "/opt/ffprobe" {
-		t.Errorf("FFprobePath=%q", cfg.DownloaderFFprobePath)
+	if cfg.Downloader.YTDLPPath != "/usr/local/bin/yt-dlp" || cfg.Downloader.FFmpegPath != "/opt/ffmpeg" || cfg.Downloader.FFprobePath != "/opt/ffprobe" {
+		t.Errorf("Downloader=%+v", cfg.Downloader)
+	}
+	if cfg.Sync.HTTPSPort != 8443 || cfg.Sync.LANBindAddress != "192.168.1.20" || cfg.Sync.PairingTimeout != "10m0s" {
+		t.Errorf("Sync=%+v", cfg.Sync)
 	}
 }
 
@@ -512,8 +530,7 @@ func TestSanitizedConfigOmitsAnythingNotOnResult(t *testing.T) {
 	}
 	for key := range probe {
 		switch key {
-		case "paths", "acquisition_concurrency",
-			"downloader_yt_dlp_path", "downloader_ffmpeg_path", "downloader_ffprobe_path":
+		case "paths", "logging", "spotify_adapter", "downloader", "acquisition", "sync":
 			// expected
 		default:
 			t.Errorf("unexpected key in sanitized config: %q", key)
