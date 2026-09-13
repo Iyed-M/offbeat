@@ -42,24 +42,41 @@ func AcquireLock(stateDir string) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", err)
 	}
-	if err := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = fd.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, ErrLockHeld
-		}
-		return nil, fmt.Errorf("flock %s: %w", path, err)
+	flockErr := syscall.Flock(int(fd.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if flockErr == nil {
+		return &Lock{fd: fd, path: path}, nil
 	}
-	return &Lock{fd: fd, path: path}, nil
+	closeErr := fd.Close()
+	switch {
+	case errors.Is(flockErr, syscall.EWOULDBLOCK), errors.Is(flockErr, syscall.EAGAIN):
+		if closeErr != nil {
+			return nil, fmt.Errorf("%w (close lock fd: %v)", ErrLockHeld, closeErr)
+		}
+		return nil, ErrLockHeld
+	default:
+		if closeErr != nil {
+			return nil, fmt.Errorf("flock %s: %w (close lock fd: %v)", path, flockErr, closeErr)
+		}
+		return nil, fmt.Errorf("flock %s: %w", path, flockErr)
+	}
 }
 
 func (l *Lock) Release() error {
 	if l == nil || l.fd == nil {
 		return nil
 	}
-	_ = syscall.Flock(int(l.fd.Fd()), syscall.LOCK_UN)
-	err := l.fd.Close()
+	unlockErr := syscall.Flock(int(l.fd.Fd()), syscall.LOCK_UN)
+	closeErr := l.fd.Close()
 	l.fd = nil
-	return err
+	switch {
+	case unlockErr != nil && closeErr != nil:
+		return fmt.Errorf("unlock lock file %s: %w; close lock file: %v", l.path, unlockErr, closeErr)
+	case unlockErr != nil:
+		return fmt.Errorf("unlock lock file %s: %w", l.path, unlockErr)
+	case closeErr != nil:
+		return fmt.Errorf("close lock file %s: %w", l.path, closeErr)
+	}
+	return nil
 }
 
 func (l *Lock) Path() string {
@@ -117,9 +134,19 @@ func BindControlSocket(socketDir string) (net.Listener, error) {
 		return nil, fmt.Errorf("listen unix %s: %w", path, err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("chmod socket %s: %w", path, err)
+		closeErr := listener.Close()
+		removeErr := os.Remove(path)
+		switch {
+		case closeErr != nil && removeErr != nil:
+			return nil, fmt.Errorf("chmod socket %s: %w (close listener: %v; remove path: %v)",
+				path, err, closeErr, removeErr)
+		case closeErr != nil:
+			return nil, fmt.Errorf("chmod socket %s: %w (close listener: %v)", path, err, closeErr)
+		case removeErr != nil:
+			return nil, fmt.Errorf("chmod socket %s: %w (remove path: %v)", path, err, removeErr)
+		default:
+			return nil, fmt.Errorf("chmod socket %s: %w", path, err)
+		}
 	}
 	return listener, nil
 }
