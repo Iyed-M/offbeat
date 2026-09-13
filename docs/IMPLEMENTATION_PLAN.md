@@ -1,5 +1,7 @@
 # Offbeat v1 — SMART Implementation Plan
 
+> **Workflow status:** This document is the delivery roadmap, not an active task queue. Before implementation, use `/to-tickets` to turn the relevant milestone or smaller slice into dependency-linked GitHub issues. Track execution, decisions, and completion in those issues; update this roadmap only when sequencing or milestone scope changes.
+
 ## 1. Planning Principles
 
 Implementation should proceed in vertical slices.
@@ -1253,7 +1255,9 @@ If using coding agents, milestone completion—not elapsed days—should control
 
 # 26. Agent Execution Rules
 
-Every coding-agent task should be limited to one milestone or a smaller subtask.
+GitHub issues are the unit of executable work. Use `/to-spec` when a change still needs a focused specification, `/to-tickets` to decompose an approved milestone or plan into tracer-bullet tickets, and `/triage` to move each issue toward `ready-for-agent`, `ready-for-human`, or `wontfix`.
+
+Every coding-agent task should be limited to one agent-ready issue. A milestone may map to one issue only when it already forms a small vertical slice; otherwise, split it into dependency-linked issues whose acceptance criteria can be verified independently.
 
 Do not prompt:
 
@@ -1264,7 +1268,7 @@ Implement Offbeat.
 Prefer:
 
 ```text
-Implement M4 Spotify snapshot persistence and reconciliation.
+Implement the agent-ready GitHub issue for M4 Spotify snapshot persistence and reconciliation.
 
 Constraints:
 - daemon exclusively owns SQLite;
@@ -1275,9 +1279,9 @@ Constraints:
 - do not implement acquisition.
 
 Before editing:
-1. inspect docs/architecture.md;
-2. inspect existing DB interfaces;
-3. propose file-level change list.
+1. read the issue and its comments;
+2. inspect `CONTEXT.md` and relevant ADRs when present;
+3. inspect existing DB interfaces, migrations, tests, and adjacent packages.
 
 Completion:
 - implementation;
@@ -1292,7 +1296,16 @@ Completion:
 
 # 27. Required Agent Workflow
 
-For each milestone:
+For each agent-ready GitHub issue:
+
+### Step 0 — claim and verify
+
+Agent must:
+
+* fetch the issue and comments from GitHub;
+* confirm that blocking issues are closed;
+* claim the issue before making the first repository change;
+* treat the issue's scope and acceptance criteria as the implementation contract.
 
 ### Step 1 — inspect
 
@@ -1304,9 +1317,9 @@ Agent must inspect:
 * tests;
 * adjacent packages.
 
-### Step 2 — plan
+### Step 2 — plan when needed
 
-Agent writes a short implementation plan containing:
+For non-trivial work, the agent writes a short implementation plan containing:
 
 ```text
 files/modules affected
@@ -1318,7 +1331,7 @@ risks
 
 ### Step 3 — implement
 
-Agent makes the smallest coherent implementation satisfying milestone requirements.
+Agent makes the smallest coherent implementation satisfying the issue's requirements.
 
 ### Step 4 — test
 
@@ -1346,7 +1359,7 @@ Agent verifies:
 
 ### Step 6 — completion report
 
-Agent reports:
+Agent posts or reports:
 
 ```text
 what changed
@@ -1355,6 +1368,8 @@ acceptance criteria satisfied
 known limitations
 follow-up work intentionally deferred
 ```
+
+Record newly discovered work as a separate issue rather than silently expanding scope. Close the active issue only after its acceptance criteria and verification steps pass.
 
 ---
 
@@ -1570,4 +1585,3 @@ Offbeat v1 is releasable only when all of the following are true:
 ```
 
 Only after this checklist passes should additional v2 features be considered.
-

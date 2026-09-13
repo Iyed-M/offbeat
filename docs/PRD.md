@@ -1,5 +1,7 @@
 # Offbeat v1 — Product Requirements Document
 
+> **Workflow status:** This document is the product requirements baseline, not an active task queue. Use `/to-spec` to publish a scoped change as a GitHub issue and `/to-tickets` to split approved work into agent-ready issues. GitHub issue state and discussion are authoritative for active delivery; update this baseline when an accepted change alters v1 product requirements.
+
 ## 1. Product Summary
 
 Offbeat is a personal, local-first system that mirrors a user's Spotify playlists and Liked Songs into an offline music library available on:
@@ -1435,4 +1437,3 @@ v1 is done only when:
 * Android contains no Spotify integration;
 * playback works using external music players;
 * documentation describes setup, dependencies, architecture, recovery, and known limitations.
-
