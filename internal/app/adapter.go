@@ -37,7 +37,10 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 	if err != nil {
 		return
 	}
-	d.addAdapterConnection(conn)
+	if !d.addAdapterConnection(conn) {
+		_ = conn.Close(websocket.StatusGoingAway, "Daemon shutting down.")
+		return
+	}
 	defer d.removeAdapterConnection(conn)
 	defer conn.CloseNow()
 	// Keep the transport bound while allowing the protocol layer to reject a
@@ -69,9 +72,13 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 
 	session := &adapterSession{conn: conn}
 	d.adapterMu.Lock()
-	if d.adapterSession != nil || d.adapterReserved {
+	if d.adapterStopping || d.adapterSession != nil || d.adapterReserved {
 		d.adapterMu.Unlock()
-		d.writeAdapterError(conn, adapterErrorSessionConflict)
+		if d.adapterStopping {
+			_ = conn.Close(websocket.StatusGoingAway, "Daemon shutting down.")
+		} else {
+			d.writeAdapterError(conn, adapterErrorSessionConflict)
+		}
 		return
 	}
 	d.adapterReserved = true
@@ -87,9 +94,24 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 
 	d.adapterMu.Lock()
 	d.adapterReserved = false
+	if d.adapterStopping {
+		d.adapterMu.Unlock()
+		_ = conn.Close(websocket.StatusGoingAway, "Daemon shutting down.")
+		return
+	}
 	d.adapterSession = session
 	d.adapterMu.Unlock()
 	defer d.removeAdapterSession(session)
+	sessionCtx, stopLiveness := context.WithCancel(ctx)
+	livenessDone := make(chan struct{})
+	go func() {
+		defer close(livenessDone)
+		d.maintainAdapterLiveness(sessionCtx, session)
+	}()
+	defer func() {
+		stopLiveness()
+		<-livenessDone
+	}()
 
 	for {
 		messageType, data, err = conn.Read(ctx)
@@ -190,7 +212,7 @@ func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 	pending := &pendingSnapshot{requestID: requestID, result: make(chan error, 1)}
 
 	d.adapterMu.Lock()
-	if d.adapterSession == nil {
+	if d.adapterStopping || d.adapterSession == nil {
 		d.adapterMu.Unlock()
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "Spotify adapter is not connected.")
 	}
@@ -326,7 +348,7 @@ func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {
 func (d *Daemon) adapterConnected() bool {
 	d.adapterMu.Lock()
 	defer d.adapterMu.Unlock()
-	return d.adapterSession != nil
+	return !d.adapterStopping && d.adapterSession != nil
 }
 
 func (d *Daemon) releaseAdapterReservation() {
@@ -350,29 +372,85 @@ func (d *Daemon) removeAdapterSession(session *adapterSession) {
 	d.adapterMu.Unlock()
 }
 
-func (d *Daemon) closeAdapterSession() {
+// stopAdapterWork prevents new adapter work and resolves the active request
+// before closing transports, so a control request cannot outlive the daemon.
+func (d *Daemon) stopAdapterWork() {
 	d.adapterMu.Lock()
+	d.adapterStopping = true
+	pending := d.pendingSnapshot
+	d.pendingSnapshot = nil
 	connections := make([]*websocket.Conn, 0, len(d.adapterConnections))
 	for conn := range d.adapterConnections {
 		connections = append(connections, conn)
 	}
 	d.adapterMu.Unlock()
+	if pending != nil {
+		pending.result <- errors.New("Spotify synchronization was cancelled because the daemon is shutting down.")
+	}
 	for _, conn := range connections {
 		_ = conn.Close(websocket.StatusGoingAway, "Daemon shutting down.")
 	}
 }
 
-func (d *Daemon) addAdapterConnection(conn *websocket.Conn) {
+func (d *Daemon) addAdapterConnection(conn *websocket.Conn) bool {
 	d.adapterMu.Lock()
 	defer d.adapterMu.Unlock()
+	if d.adapterStopping {
+		return false
+	}
 	if d.adapterConnections == nil {
 		d.adapterConnections = make(map[*websocket.Conn]struct{})
 	}
 	d.adapterConnections[conn] = struct{}{}
+	return true
 }
 
 func (d *Daemon) removeAdapterConnection(conn *websocket.Conn) {
 	d.adapterMu.Lock()
 	defer d.adapterMu.Unlock()
 	delete(d.adapterConnections, conn)
+}
+
+func (d *Daemon) maintainAdapterLiveness(ctx context.Context, session *adapterSession) {
+	ticker := time.NewTicker(d.livenessInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			window := d.livenessWindow - d.livenessInterval
+			if window <= 0 {
+				window = d.livenessWindow
+			}
+			pingCtx, cancel := context.WithTimeout(ctx, window)
+			err := session.conn.Ping(pingCtx)
+			cancel()
+			if err == nil || ctx.Err() != nil {
+				continue
+			}
+			d.expireAdapterSession(session)
+			return
+		}
+	}
+}
+
+func (d *Daemon) expireAdapterSession(session *adapterSession) {
+	d.adapterMu.Lock()
+	if d.adapterSession != session {
+		d.adapterMu.Unlock()
+		return
+	}
+	d.adapterSession = nil
+	pending := d.pendingSnapshot
+	if pending != nil && pending.session == session {
+		d.pendingSnapshot = nil
+	} else {
+		pending = nil
+	}
+	d.adapterMu.Unlock()
+	if pending != nil {
+		pending.result <- errors.New("Spotify adapter became unresponsive while waiting for snapshot response.")
+	}
+	_ = session.conn.Close(websocket.StatusGoingAway, "Adapter session liveness expired.")
 }

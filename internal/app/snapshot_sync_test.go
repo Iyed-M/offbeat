@@ -2,9 +2,11 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,59 @@ func TestSpotifySyncTimesOutWithoutResponse(t *testing.T) {
 	done := sendSync(t, d)
 	_ = readAdapterMessage(t, adapter)
 	assertSyncFailure(t, syncResponse(t, <-done), "Timed out waiting")
+}
+
+func TestAdapterLivenessExpiryFailsPendingSync(t *testing.T) {
+	d := startAdapterDaemon(t)
+	d.livenessInterval = 5 * time.Millisecond
+	d.livenessWindow = 50 * time.Millisecond
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+
+	done := sendSync(t, d)
+	_ = readAdapterMessage(t, adapter)
+	select {
+	case response := <-done:
+		assertSyncFailure(t, syncResponse(t, response), "unresponsive")
+	case <-time.After(time.Second):
+		t.Fatal("sync did not fail after liveness expiry")
+	}
+}
+
+func TestShutdownCancelsSyncAndClosesEveryAdapterConnection(t *testing.T) {
+	d, signals, done := startAdapterDaemonWithoutCleanup(t)
+
+	preAuthenticated := dialAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	syncDone := sendSync(t, d)
+	_ = readAdapterMessage(t, adapter)
+	signals <- os.Interrupt
+
+	select {
+	case response := <-syncDone:
+		assertSyncFailure(t, syncResponse(t, response), "cancelled")
+	case <-time.After(time.Second):
+		t.Fatal("sync outlived daemon shutdown")
+	}
+	for name, conn := range map[string]*websocket.Conn{"pre-authenticated": preAuthenticated, "authenticated": adapter} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, _, err := conn.Read(ctx)
+		cancel()
+		if err == nil {
+			t.Fatalf("%s adapter connection remained open during shutdown", name)
+		}
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not finish adapter shutdown")
+	}
+	assertResourcesReleased(t, d)
+	if _, err := os.Stat(SocketPath(d.socketDir)); !os.IsNotExist(err) {
+		t.Fatalf("control socket remained after shutdown: %v", err)
+	}
 }
 
 func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
