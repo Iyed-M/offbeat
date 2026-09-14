@@ -9,12 +9,12 @@ import (
 )
 
 func runSpotifySync(configPath, homeDir string) int {
-	cfg, err := loadConfig(configPath, homeDir)
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat spotify sync: config: %v\n", err)
 		return 1
 	}
-	resp, err := requestControlWithTimeout(app.SocketPath(cfg.Paths.SocketDir), "spotify.sync", spotifySyncReadTimeout)
+	resp, err := requestControlWithTimeout(app.SocketPath(bootstrap.SocketDir), "spotify.sync", spotifySyncReadTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat spotify sync: daemon-unavailable: %v\n", err)
 		return 1

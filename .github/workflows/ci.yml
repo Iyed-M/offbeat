@@ -35,3 +35,5 @@ jobs:
         run: go test ./... -count=1
       - name: Test (race)
         run: go test ./... -race -count=1
+      - name: Test Spicetify extension
+        run: node --test spicetify/offbeat/offbeat.test.js

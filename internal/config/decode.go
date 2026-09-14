@@ -20,3 +20,11 @@ func applyTOML(data []byte, cfg *Config) error {
 	dec.DisallowUnknownFields()
 	return dec.Decode(cfg)
 }
+
+func applyTOMLPermissiveFromPath(path string, cfg any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return toml.NewDecoder(bytes.NewReader(data)).Decode(cfg)
+}
