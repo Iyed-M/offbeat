@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bufio"
 	"encoding/base64"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +19,17 @@ func TestSpotifySyncRequiresAdapter(t *testing.T) {
 	assertSyncFailure(t, response, "Spotify adapter is not connected.")
 }
 
+func TestReservedAdapterHandshakeIsNotConnectedOrSyncable(t *testing.T) {
+	d := startAdapterDaemon(t)
+	d.adapterMu.Lock()
+	d.adapterReserved = true
+	d.adapterMu.Unlock()
+
+	assertAdapterConnected(t, d, false)
+	response := sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"spotify.sync"}`+"\n"))
+	assertSyncFailure(t, response, "Spotify adapter is not connected.")
+}
+
 func TestSpotifySyncCompletesOnlyForMatchingSyntheticResponse(t *testing.T) {
 	d := startAdapterDaemon(t)
 	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
@@ -24,7 +38,7 @@ func TestSpotifySyncCompletesOnlyForMatchingSyntheticResponse(t *testing.T) {
 	request := readAdapterMessage(t, adapter)
 	requestID := assertSnapshotRequest(t, request)
 	writeSyntheticResponse(t, adapter, requestID)
-	assertSyncSuccess(t, <-done)
+	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
 func TestSpotifySyncRejectsConcurrentRequest(t *testing.T) {
@@ -36,7 +50,7 @@ func TestSpotifySyncRejectsConcurrentRequest(t *testing.T) {
 	response := sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"spotify.sync"}`+"\n"))
 	assertSyncFailure(t, response, "already in progress")
 	writeSyntheticResponse(t, adapter, requestID)
-	assertSyncSuccess(t, <-done)
+	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
 func TestSpotifySyncFailsPromptlyWhenAdapterDisconnects(t *testing.T) {
@@ -50,7 +64,7 @@ func TestSpotifySyncFailsPromptlyWhenAdapterDisconnects(t *testing.T) {
 	}
 	select {
 	case response := <-done:
-		assertSyncFailure(t, response, "disconnected")
+		assertSyncFailure(t, syncResponse(t, response), "disconnected")
 	case <-time.After(time.Second):
 		t.Fatal("sync did not fail after adapter disconnect")
 	}
@@ -63,7 +77,7 @@ func TestSpotifySyncTimesOutWithoutResponse(t *testing.T) {
 
 	done := sendSync(t, d)
 	_ = readAdapterMessage(t, adapter)
-	assertSyncFailure(t, <-done, "Timed out waiting")
+	assertSyncFailure(t, syncResponse(t, <-done), "Timed out waiting")
 }
 
 func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
@@ -93,7 +107,7 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 			done := sendSync(t, d)
 			tc.response(t, adapter, assertSnapshotRequest(t, readAdapterMessage(t, adapter)))
 			assertAdapterMessage(t, adapter, "error", adapterErrorInvalidMessage)
-			assertSyncFailure(t, <-done, "disconnected")
+			assertSyncFailure(t, syncResponse(t, <-done), "disconnected")
 		})
 	}
 
@@ -103,7 +117,7 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 		done := sendSync(t, d)
 		requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
 		writeSyntheticResponse(t, adapter, requestID)
-		assertSyncSuccess(t, <-done)
+		assertSyncSuccess(t, syncResponse(t, <-done))
 		writeSyntheticResponse(t, adapter, requestID)
 		assertAdapterMessage(t, adapter, "error", adapterErrorInvalidMessage)
 	})
@@ -127,16 +141,50 @@ func TestObsoleteAdapterSessionCannotSatisfyLaterSync(t *testing.T) {
 	writeSyntheticResponse(t, old, requestID)
 	assertAdapterMessage(t, old, "error", adapterErrorInvalidMessage)
 	writeSyntheticResponse(t, current, requestID)
-	assertSyncSuccess(t, <-done)
+	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
-func sendSync(t *testing.T, d *Daemon) <-chan ipc.Response {
+type syncResult struct {
+	response ipc.Response
+	err      error
+}
+
+func sendSync(t *testing.T, d *Daemon) <-chan syncResult {
 	t.Helper()
-	done := make(chan ipc.Response, 1)
+	done := make(chan syncResult, 1)
 	go func() {
-		done <- sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"spotify.sync"}`+"\n"))
+		response, err := sendControl(SocketPath(d.socketDir), []byte(`{"version":1,"command":"spotify.sync"}`+"\n"))
+		done <- syncResult{response: response, err: err}
 	}()
 	return done
+}
+
+func sendControl(socketPath string, payload []byte) (ipc.Response, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return ipc.Response{}, fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(payload); err != nil {
+		return ipc.Response{}, fmt.Errorf("write: %w", err)
+	}
+	frame, err := ipc.ReadFrame(bufio.NewReader(conn))
+	if err != nil {
+		return ipc.Response{}, fmt.Errorf("read response: %w", err)
+	}
+	var response ipc.Response
+	if err := ipc.Decode(frame, &response); err != nil {
+		return ipc.Response{}, fmt.Errorf("decode response: %w", err)
+	}
+	return response, nil
+}
+
+func syncResponse(t *testing.T, result syncResult) ipc.Response {
+	t.Helper()
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	return result.response
 }
 
 func assertSnapshotRequest(t *testing.T, message map[string]any) string {

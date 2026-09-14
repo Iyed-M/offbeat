@@ -69,21 +69,27 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 
 	session := &adapterSession{conn: conn}
 	d.adapterMu.Lock()
-	if d.adapterSession != nil {
+	if d.adapterSession != nil || d.adapterReserved {
 		d.adapterMu.Unlock()
 		d.writeAdapterError(conn, adapterErrorSessionConflict)
 		return
 	}
-	d.adapterSession = session
+	d.adapterReserved = true
 	d.adapterMu.Unlock()
-	defer d.removeAdapterSession(session)
 
 	if err := writeAdapterMessage(ctx, conn, struct {
 		Version int    `json:"version"`
 		Type    string `json:"type"`
 	}{adapterProtocolVersion, "hello.accepted"}); err != nil {
+		d.releaseAdapterReservation()
 		return
 	}
+
+	d.adapterMu.Lock()
+	d.adapterReserved = false
+	d.adapterSession = session
+	d.adapterMu.Unlock()
+	defer d.removeAdapterSession(session)
 
 	for {
 		messageType, data, err = conn.Read(ctx)
@@ -321,6 +327,12 @@ func (d *Daemon) adapterConnected() bool {
 	d.adapterMu.Lock()
 	defer d.adapterMu.Unlock()
 	return d.adapterSession != nil
+}
+
+func (d *Daemon) releaseAdapterReservation() {
+	d.adapterMu.Lock()
+	d.adapterReserved = false
+	d.adapterMu.Unlock()
 }
 
 func (d *Daemon) removeAdapterSession(session *adapterSession) {

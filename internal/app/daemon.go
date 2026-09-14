@@ -36,6 +36,7 @@ type Daemon struct {
 	adapterServeDone   chan struct{}
 	adapterMu          sync.Mutex
 	adapterSession     *adapterSession
+	adapterReserved    bool
 	pendingSnapshot    *pendingSnapshot
 	adapterConnections map[*websocket.Conn]struct{}
 	adapterHandlers    sync.WaitGroup
