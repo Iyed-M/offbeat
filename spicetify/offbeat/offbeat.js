@@ -52,34 +52,51 @@
       }
     }
 
+    function protocolViolation(message) {
+      log("warn", message);
+      if (socket) {
+        socket.close();
+      }
+    }
+
     function handleMessage(event) {
       var message;
       try {
         message = JSON.parse(event.data);
       } catch (_error) {
-        log("warn", "Offbeat adapter received malformed daemon message.");
+        protocolViolation("Offbeat adapter received malformed daemon message.");
         return;
       }
 
       if (!message || message.version !== PROTOCOL_VERSION || typeof message.type !== "string") {
-        log("warn", "Offbeat adapter received an unsupported daemon message.");
+        protocolViolation("Offbeat adapter received an unsupported daemon message.");
         return;
       }
 
       if (message.type === "error") {
+        if (typeof message.code !== "string" || typeof message.message !== "string") {
+          protocolViolation("Offbeat adapter received an invalid daemon error.");
+          return;
+        }
         if (message.code === "authentication_failed" || message.code === "unsupported_version") {
           rejectPermanently(message.code);
+        } else if (message.code !== "session_conflict") {
+          protocolViolation("Offbeat adapter received an unrecognized daemon error.");
         }
         return;
       }
 
       if (message.type === "hello.accepted") {
+        if (authenticated || Object.keys(message).length !== 2) {
+          protocolViolation("Offbeat adapter received an invalid authentication acceptance.");
+          return;
+        }
         authenticated = true;
         reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
         return;
       }
 
-      if (message.type === "snapshot.request" && authenticated && typeof message.request_id === "string") {
+      if (message.type === "snapshot.request" && authenticated && typeof message.request_id === "string" && Object.keys(message).length === 3) {
         send({
           version: PROTOCOL_VERSION,
           type: "snapshot.response",
@@ -89,7 +106,10 @@
             marker: "offbeat-m2"
           }
         });
+        return;
       }
+
+      protocolViolation("Offbeat adapter received an invalid daemon message.");
     }
 
     function connect() {

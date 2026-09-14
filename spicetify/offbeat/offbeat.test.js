@@ -58,8 +58,6 @@ test("sends the exact hello and only answers correlated snapshot requests after 
   socket.open();
   assert.deepEqual(socket.sent, [{ version: 1, type: "hello", credential: "development-credential" }]);
 
-  socket.receive({ version: 1, type: "snapshot.request", request_id: "before-authentication" });
-  assert.equal(socket.sent.length, 1);
   socket.receive({ version: 1, type: "hello.accepted" });
   socket.receive({ version: 1, type: "snapshot.request", request_id: "opaque-request-id" });
   assert.deepEqual(socket.sent[1], {
@@ -105,6 +103,15 @@ test("authentication and version rejection stop reconnecting", function () {
     assert.equal(peer.sockets[0].closed, true);
     assert.equal(peer.timers.length, 0);
   });
+});
+
+test("closes and retries after malformed or out-of-state daemon messages", function () {
+  var peer = createPeer();
+  start(peer);
+  peer.sockets[0].open();
+  peer.sockets[0].receive({ version: 1, type: "snapshot.request", request_id: "before-authentication" });
+  assert.equal(peer.sockets[0].closed, true);
+  assert.equal(peer.timers[0].delay, 1000);
 });
 
 test("session conflict remains recoverable", function () {
