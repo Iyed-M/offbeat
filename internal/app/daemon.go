@@ -37,10 +37,13 @@ type Daemon struct {
 	adapterMu          sync.Mutex
 	adapterSession     *adapterSession
 	adapterReserved    bool
+	adapterStopping    bool
 	pendingSnapshot    *pendingSnapshot
 	adapterConnections map[*websocket.Conn]struct{}
-	adapterHandlers    sync.WaitGroup
+	controlHandlers    sync.WaitGroup
 	snapshotTimeout    time.Duration
+	livenessWindow     time.Duration
+	livenessInterval   time.Duration
 }
 
 type Options struct {
@@ -76,6 +79,8 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		startedAt:         time.Now().UTC(),
 		version:           opts.Version,
 		snapshotTimeout:   30 * time.Second,
+		livenessWindow:    30 * time.Second,
+		livenessInterval:  10 * time.Second,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -164,9 +169,9 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
-	d.closeAdapterSession()
+	d.stopAdapterWork()
 	if d.adapterServer != nil {
-		if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := d.adapterServer.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs = append(errs, fmt.Errorf("close adapter endpoint: %w", err))
 		}
 		d.adapterServer = nil
@@ -181,7 +186,6 @@ func (d *Daemon) releaseResources() error {
 		<-d.adapterServeDone
 		d.adapterServeDone = nil
 	}
-	d.adapterHandlers.Wait()
 	if d.DB != nil {
 		if err := d.DB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close database: %w", err))
@@ -262,7 +266,7 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
-		if err := serveLoop(ctx, listener, d.handleControlRequest, d.Logger); err != nil {
+		if err := serveLoop(ctx, listener, d.handleControlRequest, d.Logger, &d.controlHandlers); err != nil {
 			acceptErr = err
 		}
 	}()
@@ -277,12 +281,11 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	}
 
 	d.Logger.Info("offbeatd stopping", "phase", "stop_accept")
-	d.closeAdapterSession()
-	if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	d.stopAdapterWork()
+	if err := d.adapterServer.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		d.Logger.Warn("close adapter endpoint", "err", err)
 	}
 	<-d.adapterServeDone
-	d.adapterHandlers.Wait()
 	d.adapterServer = nil
 	d.adapterListener = nil
 	d.adapterServeDone = nil
@@ -290,6 +293,7 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		d.Logger.Warn("listener close", "err", err)
 	}
 	<-acceptDone
+	d.controlHandlers.Wait()
 	d.Logger.Info("offbeatd stopping", "phase", "drained")
 
 	d.Logger.Info("offbeatd stopping", "phase", "remove_socket")
@@ -314,8 +318,6 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 func (d *Daemon) adapterHandler(ctx context.Context) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(AdapterRoute, func(w http.ResponseWriter, r *http.Request) {
-		d.adapterHandlers.Add(1)
-		defer d.adapterHandlers.Done()
 		d.serveAdapter(ctx, w, r)
 	})
 	return mux
@@ -349,7 +351,7 @@ func (d *Daemon) shutdown(cause error) error {
 // through the versioned JSON Lines control protocol. Each connection is
 // served by its own goroutine; the connection is closed after exactly one
 // request–response exchange (per ADR 0002).
-func serveLoop(ctx context.Context, listener net.Listener, handler ipc.Handler, logger *slog.Logger) error {
+func serveLoop(ctx context.Context, listener net.Listener, handler ipc.Handler, logger *slog.Logger, handlers *sync.WaitGroup) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -358,7 +360,13 @@ func serveLoop(ctx context.Context, listener net.Listener, handler ipc.Handler, 
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
+		if handlers != nil {
+			handlers.Add(1)
+		}
 		go func(c net.Conn) {
+			if handlers != nil {
+				defer handlers.Done()
+			}
 			defer func() {
 				if r := recover(); r != nil && logger != nil {
 					logger.Error("panic serving control connection", "err", r)

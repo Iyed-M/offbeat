@@ -98,6 +98,43 @@ func TestAdapterRequiresHelloWithinFiveSeconds(t *testing.T) {
 	assertAdapterConnected(t, d, false)
 }
 
+func TestAdapterLivenessKeepsResponsiveSessionConnected(t *testing.T) {
+	d := startAdapterDaemon(t)
+	d.livenessInterval = 5 * time.Millisecond
+	d.livenessWindow = 50 * time.Millisecond
+	conn := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "test complete")
+		<-readDone
+	})
+
+	time.Sleep(3 * d.livenessWindow)
+	assertAdapterConnected(t, d, true)
+}
+
+func TestAdapterLivenessExpiresUnresponsiveSession(t *testing.T) {
+	d := startAdapterDaemon(t)
+	d.livenessInterval = 5 * time.Millisecond
+	d.livenessWindow = 50 * time.Millisecond
+	conn := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+
+	waitForAdapterConnected(t, d, false)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("unresponsive adapter was not closed")
+	}
+}
+
 func TestAdapterRejectsPostAuthenticationAndOversizedMessages(t *testing.T) {
 	d := startAdapterDaemon(t)
 	waitForSocket(t, SocketPath(d.socketDir))
@@ -133,6 +170,24 @@ func authenticateAdapter(t *testing.T, endpoint string) *websocket.Conn {
 
 func startAdapterDaemon(t *testing.T) *Daemon {
 	t.Helper()
+	d, signals, done := startAdapterDaemonWithoutCleanup(t)
+	t.Cleanup(func() {
+		signals <- os.Interrupt
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("daemon Run: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not stop")
+		}
+		_ = d.Close()
+	})
+	return d
+}
+
+func startAdapterDaemonWithoutCleanup(t *testing.T) (*Daemon, chan os.Signal, <-chan error) {
+	t.Helper()
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve adapter port: %v", err)
@@ -157,20 +212,8 @@ func startAdapterDaemon(t *testing.T) *Daemon {
 	done := make(chan error, 1)
 	signals := make(chan os.Signal, 1)
 	go func() { done <- d.Run(context.Background(), RunOptions{SignalCh: signals}) }()
-	t.Cleanup(func() {
-		signals <- os.Interrupt
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("daemon Run: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("daemon did not stop")
-		}
-		_ = d.Close()
-	})
 	waitForSocket(t, SocketPath(d.socketDir))
-	return d
+	return d, signals, done
 }
 
 func dialAdapter(t *testing.T, endpoint string) *websocket.Conn {
