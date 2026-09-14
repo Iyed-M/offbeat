@@ -2,12 +2,17 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/coder/websocket"
 )
 
@@ -17,7 +22,14 @@ const (
 )
 
 type adapterSession struct {
-	conn *websocket.Conn
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
+type pendingSnapshot struct {
+	session   *adapterSession
+	requestID string
+	result    chan error
 }
 
 func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -73,23 +85,26 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// This ticket establishes session ownership only. Any post-authentication
-	// application message is invalid until snapshot exchange work is added.
-	messageType, data, err = conn.Read(ctx)
-	if err != nil {
-		if errors.Is(err, websocket.ErrMessageTooBig) {
+	for {
+		messageType, data, err = conn.Read(ctx)
+		if err != nil {
+			if errors.Is(err, websocket.ErrMessageTooBig) {
+				d.removeAdapterSession(session)
+				d.writeAdapterError(conn, adapterErrorInvalidMessage)
+			}
+			return
+		}
+		if messageType != websocket.MessageText || len(data) > adapterMaxMessageBytes {
 			d.removeAdapterSession(session)
 			d.writeAdapterError(conn, adapterErrorInvalidMessage)
+			return
 		}
-		return
+		if protocolErr := d.acceptSnapshotResponse(session, data); protocolErr != "" {
+			d.removeAdapterSession(session)
+			d.writeAdapterError(conn, protocolErr)
+			return
+		}
 	}
-	if messageType != websocket.MessageText || len(data) > adapterMaxMessageBytes {
-		d.removeAdapterSession(session)
-		d.writeAdapterError(conn, adapterErrorInvalidMessage)
-		return
-	}
-	d.removeAdapterSession(session)
-	d.writeAdapterError(conn, postAuthenticationError(data))
 }
 
 const (
@@ -129,16 +144,6 @@ func parseHello(data []byte) (string, string) {
 	return credential, ""
 }
 
-func postAuthenticationError(data []byte) string {
-	var message struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(data, &message); err == nil && message.Version != adapterProtocolVersion {
-		return adapterErrorUnsupportedVersion
-	}
-	return adapterErrorInvalidMessage
-}
-
 func (d *Daemon) writeAdapterError(conn *websocket.Conn, code string) {
 	messages := map[string]string{
 		adapterErrorAuthenticationFailed: "Adapter authentication failed.",
@@ -163,6 +168,155 @@ func writeAdapterMessage(ctx context.Context, conn *websocket.Conn, value any) e
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
+func (s *adapterSession) write(ctx context.Context, value any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return writeAdapterMessage(ctx, s.conn, value)
+}
+
+// handleSpotifySync owns the one M2 request until the matching response,
+// disconnect, timeout, or daemon shutdown completes it.
+func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
+	requestID, err := newSnapshotRequestID()
+	if err != nil {
+		return nil, fmt.Errorf("generate snapshot request ID: %w", err)
+	}
+	pending := &pendingSnapshot{requestID: requestID, result: make(chan error, 1)}
+
+	d.adapterMu.Lock()
+	if d.adapterSession == nil {
+		d.adapterMu.Unlock()
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "Spotify adapter is not connected.")
+	}
+	if d.pendingSnapshot != nil {
+		d.adapterMu.Unlock()
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "Spotify synchronization is already in progress.")
+	}
+	pending.session = d.adapterSession
+	d.pendingSnapshot = pending
+	d.adapterMu.Unlock()
+
+	if err := pending.session.write(ctx, snapshotRequest{Version: adapterProtocolVersion, Type: "snapshot.request", RequestID: requestID}); err != nil {
+		message := "Spotify adapter disconnected before receiving the snapshot request."
+		d.completePendingSnapshot(pending, errors.New(message))
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+	}
+
+	timer := time.NewTimer(d.snapshotTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-pending.result:
+		if err != nil {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
+		}
+		return struct{}{}, nil
+	case <-timer.C:
+		message := "Timed out waiting for Spotify adapter snapshot response."
+		d.completePendingSnapshot(pending, errors.New(message))
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+	case <-ctx.Done():
+		message := "Spotify synchronization was cancelled."
+		d.completePendingSnapshot(pending, errors.New(message))
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+	}
+}
+
+func newSnapshotRequestID() (string, error) {
+	bytes := make([]byte, 16) // 128 bits of cryptographically random entropy.
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+type snapshotRequest struct {
+	Version   int    `json:"version"`
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+}
+
+func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) string {
+	response, protocolErr := parseSnapshotResponse(data)
+	if protocolErr != "" {
+		return protocolErr
+	}
+	d.adapterMu.Lock()
+	pending := d.pendingSnapshot
+	if d.adapterSession != session || pending == nil || pending.session != session || pending.requestID != response.RequestID {
+		d.adapterMu.Unlock()
+		return adapterErrorInvalidMessage
+	}
+	d.pendingSnapshot = nil
+	d.adapterMu.Unlock()
+	pending.result <- nil
+	return ""
+}
+
+type snapshotResponse struct {
+	RequestID string
+}
+
+func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	if versionField, ok := fields["version"]; ok {
+		var version int
+		if err := json.Unmarshal(versionField, &version); err != nil {
+			return snapshotResponse{}, adapterErrorInvalidMessage
+		}
+		if version != adapterProtocolVersion {
+			return snapshotResponse{}, adapterErrorUnsupportedVersion
+		}
+	}
+	if len(fields) != 4 {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	for key := range fields {
+		if key != "version" && key != "type" && key != "request_id" && key != "snapshot" {
+			return snapshotResponse{}, adapterErrorInvalidMessage
+		}
+	}
+	var version int
+	var messageType, requestID string
+	if err := json.Unmarshal(fields["version"], &version); err != nil {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	if version != adapterProtocolVersion {
+		return snapshotResponse{}, adapterErrorUnsupportedVersion
+	}
+	if err := json.Unmarshal(fields["type"], &messageType); err != nil || messageType != "snapshot.response" {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	if err := json.Unmarshal(fields["request_id"], &requestID); err != nil || requestID == "" {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	var snapshot map[string]json.RawMessage
+	if err := json.Unmarshal(fields["snapshot"], &snapshot); err != nil || len(snapshot) != 2 {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	var kind, marker string
+	if err := json.Unmarshal(snapshot["kind"], &kind); err != nil || kind != "synthetic" {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	if err := json.Unmarshal(snapshot["marker"], &marker); err != nil || marker != "offbeat-m2" {
+		return snapshotResponse{}, adapterErrorInvalidMessage
+	}
+	return snapshotResponse{RequestID: requestID}, ""
+}
+
+func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {
+	d.adapterMu.Lock()
+	if d.pendingSnapshot != pending {
+		d.adapterMu.Unlock()
+		return
+	}
+	d.pendingSnapshot = nil
+	d.adapterMu.Unlock()
+	pending.result <- err
+}
+
 func (d *Daemon) adapterConnected() bool {
 	d.adapterMu.Lock()
 	defer d.adapterMu.Unlock()
@@ -171,10 +325,17 @@ func (d *Daemon) adapterConnected() bool {
 
 func (d *Daemon) removeAdapterSession(session *adapterSession) {
 	d.adapterMu.Lock()
-	defer d.adapterMu.Unlock()
 	if d.adapterSession == session {
 		d.adapterSession = nil
 	}
+	pending := d.pendingSnapshot
+	if pending != nil && pending.session == session {
+		d.pendingSnapshot = nil
+		d.adapterMu.Unlock()
+		pending.result <- errors.New("Spotify adapter disconnected while waiting for snapshot response.")
+		return
+	}
+	d.adapterMu.Unlock()
 }
 
 func (d *Daemon) closeAdapterSession() {

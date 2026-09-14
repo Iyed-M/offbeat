@@ -49,6 +49,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runConfig(configPath, homeDir))
+	case "spotify":
+		if len(rest) != 1 || rest[0] != "sync" {
+			fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat spotify sync")
+			os.Exit(2)
+		}
+		os.Exit(runSpotifySync(configPath, homeDir))
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
@@ -66,7 +72,8 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  status    report daemon/database status through the control socket")
-	fmt.Println("  config    print the daemon's sanitized effective configuration")
+	fmt.Println("  config        print the daemon's sanitized effective configuration")
+	fmt.Println("  spotify sync  request a synthetic Spotify snapshot from the adapter")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }

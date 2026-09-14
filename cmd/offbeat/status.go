@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	controlConnectTimeout = 2 * time.Second
-	controlReadTimeout    = 5 * time.Second
+	controlConnectTimeout  = 2 * time.Second
+	controlReadTimeout     = 5 * time.Second
+	spotifySyncReadTimeout = 35 * time.Second
 )
 
 // runStatus connects to the daemon over its control socket, requests the
@@ -72,6 +73,10 @@ func runStatus(configPath, homeDir string) int {
 // the wire are reported as unknown-outcome because the daemon may have
 // received and acted on the request before the connection dropped.
 func requestControl(sockPath, command string) (ipc.Response, error) {
+	return requestControlWithTimeout(sockPath, command, controlReadTimeout)
+}
+
+func requestControlWithTimeout(sockPath, command string, readTimeout time.Duration) (ipc.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), controlConnectTimeout)
 	defer cancel()
 
@@ -82,7 +87,7 @@ func requestControl(sockPath, command string) (ipc.Response, error) {
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(controlReadTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(readTimeout)); err != nil {
 		return ipc.Response{}, fmt.Errorf("set deadline: %w", err)
 	}
 

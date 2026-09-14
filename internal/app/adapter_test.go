@@ -169,6 +169,7 @@ func startAdapterDaemon(t *testing.T) *Daemon {
 		}
 		_ = d.Close()
 	})
+	waitForSocket(t, SocketPath(d.socketDir))
 	return d
 }
 
