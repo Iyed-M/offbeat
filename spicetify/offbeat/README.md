@@ -12,13 +12,18 @@ Milestone 12 owns production credential provisioning, extension installation,
 Spicetify configuration, and `offbeat setup`.
 
 1. Supply the daemon's development adapter endpoint and credential. The M2
-   protocol default endpoint is `ws://127.0.0.1:16352/v1/adapter`. Use the
-   same development credential that the compatible daemon was started with.
-   Generate a local test value if needed, but never commit it:
+   protocol default endpoint is `ws://127.0.0.1:16352/v1/adapter`. Generate a
+   local test value if needed, but never commit it:
 
    ```sh
    credential="$(openssl rand -base64 32 | tr -d '\n')"
    ```
+
+   Supply that exact value to the compatible daemon through its development
+   Adapter credential injection mechanism, then use the same value in step 2.
+   Daemon-side injection is implemented by M2 issue #11 and is deliberately
+   not invented or implemented by this extension-only ticket. It is not a
+   final production setup interface.
 
 2. Generate a local configured artifact. This script only writes the file you
    name; it does not discover, copy to, or configure Spicetify. The output is

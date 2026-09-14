@@ -19,6 +19,7 @@ function createPeer() {
   };
   WebSocket.prototype.open = function () { this.onopen(); };
   WebSocket.prototype.receive = function (message) { this.onmessage({ data: JSON.stringify(message) }); };
+  WebSocket.prototype.receiveRaw = function (message) { this.onmessage({ data: message }); };
   WebSocket.prototype.disconnect = function () { this.onclose(); };
 
   var timers = [];
@@ -110,6 +111,15 @@ test("closes and retries after malformed or out-of-state daemon messages", funct
   start(peer);
   peer.sockets[0].open();
   peer.sockets[0].receive({ version: 1, type: "snapshot.request", request_id: "before-authentication" });
+  assert.equal(peer.sockets[0].closed, true);
+  assert.equal(peer.timers[0].delay, 1000);
+});
+
+test("closes and retries after an oversized daemon message", function () {
+  var peer = createPeer();
+  start(peer);
+  peer.sockets[0].open();
+  peer.sockets[0].receiveRaw("x".repeat(16 * 1024 * 1024 + 1));
   assert.equal(peer.sockets[0].closed, true);
   assert.equal(peer.timers[0].delay, 1000);
 });

@@ -4,6 +4,7 @@
   var PROTOCOL_VERSION = 1;
   var INITIAL_RECONNECT_DELAY_MS = 1000;
   var MAX_RECONNECT_DELAY_MS = 30000;
+  var MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
   function createAdapter(config, dependencies) {
     if (!config || typeof config.endpoint !== "string" || typeof config.credential !== "string") {
@@ -61,6 +62,10 @@
 
     function handleMessage(event) {
       var message;
+      if (typeof event.data !== "string" || new global.TextEncoder().encode(event.data).length > MAX_MESSAGE_BYTES) {
+        protocolViolation("Offbeat adapter received an oversized daemon message.");
+        return;
+      }
       try {
         message = JSON.parse(event.data);
       } catch (_error) {
@@ -74,7 +79,7 @@
       }
 
       if (message.type === "error") {
-        if (typeof message.code !== "string" || typeof message.message !== "string") {
+        if (authenticated || typeof message.code !== "string" || typeof message.message !== "string" || Object.keys(message).length !== 4) {
           protocolViolation("Offbeat adapter received an invalid daemon error.");
           return;
         }
