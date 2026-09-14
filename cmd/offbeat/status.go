@@ -125,6 +125,7 @@ func printStatus(w io.Writer, s ipc.StatusResult, sockPath string) {
 	fmt.Fprintf(w, "  pid           : %d\n", s.PID)
 	fmt.Fprintf(w, "  started_at    : %s\n", s.StartedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "  database      : %s\n", dbState)
+	fmt.Fprintf(w, "  Spotify adapter: %s\n", adapterState(s.AdapterConnected))
 	fmt.Fprintf(w, "  socket        : %s\n", sockPath)
 }
 
@@ -133,6 +134,13 @@ func boolDBReady(ok bool) string {
 		return "ready"
 	}
 	return "not ready"
+}
+
+func adapterState(connected bool) string {
+	if connected {
+		return "connected"
+	}
+	return "disconnected"
 }
 
 func loadConfig(configPath, homeDir string) (config.Config, error) {

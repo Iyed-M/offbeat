@@ -3,6 +3,7 @@ module github.com/Iyed-M/offbeat
 go 1.27.0
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/pelletier/go-toml/v2 v2.4.3
 	modernc.org/sqlite v1.58.0
 )
