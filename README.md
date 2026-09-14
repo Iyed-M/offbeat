@@ -7,16 +7,17 @@ library, then synchronizes the playable subset to a paired Android device on
 the same network. Spotify stays the source of truth. `offbeat` owns only the
 local representation.
 
-This is **Milestone 0**: a repository skeleton with the daemon lifecycle,
-SQLite migration framework, TOML configuration loader, structured logging, and
-domain types. No product behaviour is implemented yet.
+This repository is at **Milestone 2**. The daemon, CLI, and Spicetify extension
+can prove their authenticated local transport with a synthetic snapshot only.
+They do not yet collect, persist, or reconcile real Spotify state.
 
 ## Components
 
 | Component | Path             | Status |
 |-----------|------------------|--------|
-| Daemon    | `cmd/offbeatd`   | scaffold: starts, inits DB, exits on SIGTERM |
-| CLI       | `cmd/offbeat`    | scaffold: `status`, `config` |
+| Daemon    | `cmd/offbeatd`   | lifecycle, Control protocol, and local adapter endpoint |
+| CLI       | `cmd/offbeat`    | `status`, `config`, and synthetic `spotify sync` |
+| Extension | `spicetify/offbeat` | M2 synthetic WebSocket adapter |
 | Domain    | `internal/domain`| typed IDs and value types |
 | Config    | `internal/config`| TOML loader with defaults |
 | DB        | `internal/db`    | SQLite + migration runner |
@@ -79,8 +80,16 @@ offbeatd
 ```
 
 The adapter listener binds to `ws://127.0.0.1:16352/v1/adapter` by default.
-Only literal loopback addresses and nonzero ports are accepted. WebSocket
-authentication and the Spicetify extension arrive in the following M2 ticket.
+Only literal loopback addresses and nonzero ports are accepted. The adapter
+authenticates as its first WebSocket message and supports one active session.
+
+## M2 Spicetify smoke test
+
+The manual development procedure, including the configured extension artifact
+and complete connect, disconnect, and reconnect smoke sequence, is in
+[`spicetify/offbeat/README.md`](spicetify/offbeat/README.md). It is not a
+production installation flow: Milestone 12 owns credential provisioning,
+Spicetify installation/linking, and `offbeat setup`.
 
 ## Project layout
 
