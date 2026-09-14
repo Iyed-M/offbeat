@@ -20,6 +20,8 @@ import (
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
 
+const testAdapterCredential = "test-adapter-credential"
+
 func TestNewDaemonCreatesDirsAndMigrates(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")
@@ -31,13 +33,17 @@ database = "`+dbPath+`"
 		t.Fatal(err)
 	}
 	d, err := NewDaemon(context.Background(), Options{
-		HomeDir:    dir,
-		ConfigPath: cfgPath,
+		HomeDir:           dir,
+		ConfigPath:        cfgPath,
+		AdapterCredential: testAdapterCredential,
 	})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
+	if d.adapterCredential != testAdapterCredential {
+		t.Fatal("daemon did not retain the injected adapter credential")
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("db file missing: %v", err)
 	}
@@ -48,6 +54,13 @@ database = "`+dbPath+`"
 	if count == 0 {
 		t.Fatal("expected migrations applied")
 	}
+	logs, err := os.ReadFile(d.Cfg.Paths.LogFile)
+	if err != nil {
+		t.Fatalf("read daemon log: %v", err)
+	}
+	if strings.Contains(string(logs), testAdapterCredential) {
+		t.Fatal("daemon log contains adapter credential")
+	}
 }
 
 func TestNewDaemonRejectsBadConfig(t *testing.T) {
@@ -56,9 +69,24 @@ func TestNewDaemonRejectsBadConfig(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("[unknown]\nx = 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: cfgPath})
+	_, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: cfgPath, AdapterCredential: testAdapterCredential})
 	if err == nil {
 		t.Fatal("expected error for unknown field")
+	}
+}
+
+func TestNewDaemonRequiresAdapterCredential(t *testing.T) {
+	dir := t.TempDir()
+	_, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	if !errors.Is(err, ErrAdapterCredentialUnavailable) {
+		t.Fatalf("NewDaemon error = %v, want ErrAdapterCredentialUnavailable", err)
+	}
+}
+
+func TestAdapterEndpointDefault(t *testing.T) {
+	cfg := config.Defaults(t.TempDir())
+	if got, want := AdapterEndpoint(cfg.SpotifyAdapter.BindAddress, cfg.SpotifyAdapter.Port), "ws://127.0.0.1:16352/v1/adapter"; got != want {
+		t.Fatalf("AdapterEndpoint() = %q, want %q", got, want)
 	}
 }
 
@@ -68,7 +96,7 @@ func TestRunRespondsToSignal(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: cfgPath})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: cfgPath, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -94,7 +122,7 @@ func TestRunRespondsToSignal(t *testing.T) {
 func TestRunRespondsToSIGTERM(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonHelperProcess$")
-	cmd.Env = append(os.Environ(), "OFFBEAT_DAEMON_HELPER=1", "OFFBEAT_HOME="+dir)
+	cmd.Env = append(os.Environ(), "OFFBEAT_DAEMON_HELPER=1", "OFFBEAT_HOME="+dir, "OFFBEAT_ADAPTER_CREDENTIAL="+testAdapterCredential)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatalf("create daemon helper stderr pipe: %v", err)
@@ -136,7 +164,7 @@ func TestDaemonHelperProcess(t *testing.T) {
 	if os.Getenv("OFFBEAT_DAEMON_HELPER") != "1" {
 		return
 	}
-	d, err := NewDaemon(context.Background(), Options{})
+	d, err := NewDaemon(context.Background(), Options{AdapterCredential: os.Getenv("OFFBEAT_ADAPTER_CREDENTIAL")})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -148,7 +176,7 @@ func TestDaemonHelperProcess(t *testing.T) {
 
 func TestRunRespondsToContextCancel(t *testing.T) {
 	dir := t.TempDir()
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -169,7 +197,7 @@ func TestRunRespondsToContextCancel(t *testing.T) {
 
 func TestRunReleasesOwnershipAfterStaleSocketResolutionFailure(t *testing.T) {
 	dir := t.TempDir()
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -185,7 +213,7 @@ func TestRunReleasesOwnershipAfterStaleSocketResolutionFailure(t *testing.T) {
 
 func TestRunReleasesOwnershipAfterSocketBindFailure(t *testing.T) {
 	dir := t.TempDir()
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -197,6 +225,44 @@ func TestRunReleasesOwnershipAfterSocketBindFailure(t *testing.T) {
 		t.Fatal("Run succeeded after socket directory removal")
 	}
 	assertResourcesReleased(t, d)
+}
+
+func TestRunBindsAdapterBeforeControlSocketAndReleasesOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy adapter port: %v", err)
+	}
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("[spotify_adapter]\nbind_address = %q\nport = %d\n", "127.0.0.1", port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: cfgPath, AdapterCredential: testAdapterCredential})
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if err := d.Run(context.Background(), RunOptions{SignalCh: make(chan os.Signal)}); err == nil {
+		t.Fatal("Run succeeded with occupied adapter endpoint")
+	}
+	if _, err := os.Stat(SocketPath(d.socketDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("control socket exposed after adapter bind failure: %v", err)
+	}
+	assertResourcesReleased(t, d)
+}
+
+func TestRunAdapterListenerIsReadyBeforeControlSocket(t *testing.T) {
+	d := startDaemonForTest(t, "0.0.0-m2")
+	waitForSocket(t, SocketPath(d.socketDir))
+
+	endpoint := net.JoinHostPort(d.Cfg.SpotifyAdapter.BindAddress, fmt.Sprintf("%d", d.Cfg.SpotifyAdapter.Port))
+	conn, err := net.DialTimeout("tcp", endpoint, time.Second)
+	if err != nil {
+		t.Fatalf("adapter listener unavailable while control socket is ready: %v", err)
+	}
+	_ = conn.Close()
 }
 
 func assertResourcesReleased(t *testing.T, d *Daemon) {
@@ -286,6 +352,9 @@ func TestStatusCommandReportsDaemonIdentity(t *testing.T) {
 	var status ipc.StatusResult
 	if err := json.Unmarshal(raw, &status); err != nil {
 		t.Fatalf("decode status: %v", err)
+	}
+	if strings.Contains(string(raw), testAdapterCredential) {
+		t.Fatal("status contains adapter credential")
 	}
 
 	if status.DaemonVersion != "0.0.0-m1" {
@@ -465,6 +534,9 @@ pairing_timeout = "10m"
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode config: %v", err)
 	}
+	if strings.Contains(string(raw), testAdapterCredential) {
+		t.Fatal("effective config contains adapter credential")
+	}
 
 	if cfg.Paths.Database != customDB {
 		t.Errorf("Database=%q want %q", cfg.Paths.Database, customDB)
@@ -524,6 +596,9 @@ func TestSanitizedConfigOmitsAnythingNotOnResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+	if strings.Contains(string(raw), testAdapterCredential) {
+		t.Fatal("sanitized config contains adapter credential")
+	}
 	var probe map[string]any
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -553,7 +628,7 @@ func TestSanitizedConfigOmitsAnythingNotOnResult(t *testing.T) {
 func startDaemonForTest(t *testing.T, version string) *Daemon {
 	t.Helper()
 	dir := t.TempDir()
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, Version: version})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, Version: version, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
@@ -580,7 +655,7 @@ func startDaemonForTest(t *testing.T, version string) *Daemon {
 func startDaemonWithConfig(t *testing.T, configPath, version string) (*Daemon, error) {
 	t.Helper()
 	dir := t.TempDir()
-	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: configPath, Version: version})
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: configPath, Version: version, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		return nil, err
 	}

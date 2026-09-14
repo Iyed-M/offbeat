@@ -12,6 +12,7 @@ import (
 const (
 	lockFileName   = "offbeatd.lock"
 	socketFileName = "offbeatd.sock"
+	AdapterRoute   = "/v1/adapter"
 )
 
 var ErrLockHeld = errors.New("another daemon owner holds the lock for this directory")
@@ -31,6 +32,12 @@ func LockPath(stateDir string) string {
 
 func SocketPath(socketDir string) string {
 	return filepath.Join(socketDir, socketFileName)
+}
+
+// AdapterEndpoint returns the fixed, versioned adapter endpoint for an
+// already validated adapter listener configuration.
+func AdapterEndpoint(bindAddress string, port int) string {
+	return "ws://" + net.JoinHostPort(bindAddress, fmt.Sprintf("%d", port)) + AdapterRoute
 }
 
 func AcquireLock(stateDir string) (*Lock, error) {

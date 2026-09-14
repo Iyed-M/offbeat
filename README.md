@@ -66,6 +66,22 @@ offbeatd --config /path/to/config.toml --home /tmp/sandbox
 offbeat  --config /path/to/config.toml status
 ```
 
+## M2 development credential
+
+Until `offbeat setup` is implemented, the daemon requires a development-only
+adapter credential from `OFFBEAT_ADAPTER_CREDENTIAL`. This value is not TOML
+configuration and is never included in daemon status or effective-config
+output. Use a locally chosen secret when developing the adapter transport:
+
+```bash
+export OFFBEAT_ADAPTER_CREDENTIAL='development-only-secret'
+offbeatd
+```
+
+The adapter listener binds to `ws://127.0.0.1:16352/v1/adapter` by default.
+Only literal loopback addresses and nonzero ports are accepted. WebSocket
+authentication and the Spicetify extension arrive in the following M2 ticket.
+
 ## Project layout
 
 ```text

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,7 +77,7 @@ func Defaults(home string) Config {
 	cfg.Logging.Format = "text"
 
 	cfg.SpotifyAdapter.BindAddress = "127.0.0.1"
-	cfg.SpotifyAdapter.Port = 0
+	cfg.SpotifyAdapter.Port = 16352
 
 	cfg.Downloader.YTDLPPath = "yt-dlp"
 	cfg.Downloader.FFmpegPath = "ffmpeg"
@@ -161,7 +162,23 @@ func (l *Loader) Load() (Config, error) {
 		}
 		cfg = applyDerived(cfg, home)
 	}
+	if err := ValidateSpotifyAdapter(cfg.SpotifyAdapter); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// ValidateSpotifyAdapter rejects endpoints that could expose the local adapter
+// outside this user's loopback interfaces.
+func ValidateSpotifyAdapter(adapter SpotifyAdapter) error {
+	addr, err := netip.ParseAddr(adapter.BindAddress)
+	if err != nil || !addr.IsLoopback() {
+		return fmt.Errorf("spotify adapter bind_address must be a literal loopback IP address")
+	}
+	if adapter.Port < 1 || adapter.Port > 65535 {
+		return fmt.Errorf("spotify adapter port must be between 1 and 65535")
+	}
+	return nil
 }
 
 func applyDerived(cfg Config, home string) Config {

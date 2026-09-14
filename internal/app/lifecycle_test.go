@@ -220,6 +220,7 @@ func startHelper(t *testing.T, homeDir string) *helperHandle {
 	cmd.Env = append(os.Environ(),
 		"OFFBEAT_DAEMON_HELPER=1",
 		"OFFBEAT_HOME="+homeDir,
+		"OFFBEAT_ADAPTER_CREDENTIAL="+testAdapterCredential,
 	)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
