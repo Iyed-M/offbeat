@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/logging"
+	"github.com/coder/websocket"
 )
 
 type Daemon struct {
@@ -28,10 +30,14 @@ type Daemon struct {
 	lock      *Lock
 	socketDir string
 
-	adapterCredential string
-	adapterListener   net.Listener
-	adapterServer     *http.Server
-	adapterServeDone  chan struct{}
+	adapterCredential  string
+	adapterListener    net.Listener
+	adapterServer      *http.Server
+	adapterServeDone   chan struct{}
+	adapterMu          sync.Mutex
+	adapterSession     *adapterSession
+	adapterConnections map[*websocket.Conn]struct{}
+	adapterHandlers    sync.WaitGroup
 }
 
 type Options struct {
@@ -154,6 +160,7 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
+	d.closeAdapterSession()
 	if d.adapterServer != nil {
 		if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs = append(errs, fmt.Errorf("close adapter endpoint: %w", err))
@@ -170,6 +177,7 @@ func (d *Daemon) releaseResources() error {
 		<-d.adapterServeDone
 		d.adapterServeDone = nil
 	}
+	d.adapterHandlers.Wait()
 	if d.DB != nil {
 		if err := d.DB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close database: %w", err))
@@ -217,7 +225,10 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		return d.shutdown(fmt.Errorf("bind Spotify adapter listener: %w", err))
 	}
 	d.adapterListener = adapterListener
-	adapterServer := &http.Server{Handler: adapterHandler()}
+	adapterServer := &http.Server{
+		Handler:     d.adapterHandler(ctx),
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 	adapterServeDone := make(chan struct{})
 	d.adapterServer = adapterServer
 	d.adapterServeDone = adapterServeDone
@@ -262,10 +273,12 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	}
 
 	d.Logger.Info("offbeatd stopping", "phase", "stop_accept")
+	d.closeAdapterSession()
 	if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		d.Logger.Warn("close adapter endpoint", "err", err)
 	}
 	<-d.adapterServeDone
+	d.adapterHandlers.Wait()
 	d.adapterServer = nil
 	d.adapterListener = nil
 	d.adapterServeDone = nil
@@ -294,12 +307,12 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	return nil
 }
 
-func adapterHandler() http.Handler {
+func (d *Daemon) adapterHandler(ctx context.Context) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(AdapterRoute, func(w http.ResponseWriter, _ *http.Request) {
-		// M2's next ticket upgrades this route to the authenticated WebSocket
-		// protocol. Keeping the route live now makes readiness observable.
-		w.WriteHeader(http.StatusUpgradeRequired)
+	mux.HandleFunc(AdapterRoute, func(w http.ResponseWriter, r *http.Request) {
+		d.adapterHandlers.Add(1)
+		defer d.adapterHandlers.Done()
+		d.serveAdapter(ctx, w, r)
 	})
 	return mux
 }
@@ -380,11 +393,12 @@ func (d *Daemon) handleStatus(ctx context.Context) (any, error) {
 		return nil, fmt.Errorf("read schema version: %w", err)
 	}
 	return ipc.StatusResult{
-		DaemonVersion: d.version,
-		PID:           os.Getpid(),
-		StartedAt:     d.startedAt,
-		DBReady:       true,
-		SchemaVersion: schemaVersion,
+		DaemonVersion:    d.version,
+		PID:              os.Getpid(),
+		StartedAt:        d.startedAt,
+		DBReady:          true,
+		SchemaVersion:    schemaVersion,
+		AdapterConnected: d.adapterConnected(),
 	}, nil
 }
 

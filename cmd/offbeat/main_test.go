@@ -87,6 +87,7 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 		"started_at    :",
 		"database      : ready",
 		"schema version 1",
+		"Spotify adapter: disconnected",
 		"socket        :",
 	} {
 		if !strings.Contains(out, want) {
