@@ -36,8 +36,11 @@ type Daemon struct {
 	adapterServeDone   chan struct{}
 	adapterMu          sync.Mutex
 	adapterSession     *adapterSession
+	adapterReserved    bool
+	pendingSnapshot    *pendingSnapshot
 	adapterConnections map[*websocket.Conn]struct{}
 	adapterHandlers    sync.WaitGroup
+	snapshotTimeout    time.Duration
 }
 
 type Options struct {
@@ -72,6 +75,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		adapterCredential: opts.AdapterCredential,
 		startedAt:         time.Now().UTC(),
 		version:           opts.Version,
+		snapshotTimeout:   30 * time.Second,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -376,6 +380,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleStatus(ctx)
 	case "config":
 		return d.handleConfig(ctx)
+	case "spotify.sync":
+		return d.handleSpotifySync(ctx)
 	default:
 		return nil, ipc.NewError(ipc.CodeInvalidRequest,
 			fmt.Sprintf("unknown command %q", req.Command))

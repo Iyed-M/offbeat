@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // These tests are black-box: they build the real offbeatd and offbeat
@@ -98,6 +103,99 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 		// stderr should be empty on success
 		t.Errorf("unexpected stderr: %q", errOut)
 	}
+}
+
+func TestCLISpotifySyncPrintsSyntheticSuccess(t *testing.T) {
+	home := t.TempDir()
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve adapter port: %v", err)
+	}
+	port := reserved.Addr().(*net.TCPAddr).Port
+	if err := reserved.Close(); err != nil {
+		t.Fatalf("release adapter port: %v", err)
+	}
+	configPath := filepath.Join(home, ".config", "offbeat", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("[spotify_adapter]\nport = %d\n", port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(offbeatdPath)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home, "OFFBEAT_ADAPTER_CREDENTIAL=test-adapter-credential")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start offbeatd: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+	}()
+	if err := waitForDaemonReady(home, 5*time.Second); err != nil {
+		t.Fatalf("daemon not ready: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	adapter, _, err := websocket.Dial(ctx, fmt.Sprintf("ws://127.0.0.1:%d/v1/adapter", port), nil)
+	if err != nil {
+		t.Fatalf("dial adapter: %v", err)
+	}
+	defer adapter.Close(websocket.StatusNormalClosure, "test complete")
+	writeCLIAdapterJSON(t, adapter, map[string]any{"version": 1, "type": "hello", "credential": "test-adapter-credential"})
+	if message := readCLIAdapterJSON(t, adapter); message["type"] != "hello.accepted" {
+		t.Fatalf("hello response = %#v", message)
+	}
+
+	type cliResult struct {
+		out, errOut string
+		err         error
+	}
+	done := make(chan cliResult, 1)
+	go func() {
+		out, errOut, err := runCLI(t, home, "spotify", "sync")
+		done <- cliResult{out, errOut, err}
+	}()
+	request := readCLIAdapterJSON(t, adapter)
+	requestID, ok := request["request_id"].(string)
+	if !ok || request["type"] != "snapshot.request" {
+		t.Fatalf("snapshot request = %#v", request)
+	}
+	writeCLIAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"snapshot": map[string]any{"kind": "synthetic", "marker": "offbeat-m2"},
+	})
+	result := <-done
+	if result.err != nil || result.errOut != "" || result.out != "Spotify synthetic snapshot received.\n" {
+		t.Fatalf("offbeat spotify sync = stdout %q stderr %q err %v", result.out, result.errOut, result.err)
+	}
+}
+
+func writeCLIAdapterJSON(t *testing.T, conn *websocket.Conn, value any) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(context.Background(), websocket.MessageText, data); err != nil {
+		t.Fatalf("write adapter message: %v", err)
+	}
+}
+
+func readCLIAdapterJSON(t *testing.T, conn *websocket.Conn) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read adapter message: %v", err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(data, &message); err != nil {
+		t.Fatalf("decode adapter message: %v", err)
+	}
+	return message
 }
 
 func TestCLIStatusReportsDaemonUnavailableWhenNoDaemon(t *testing.T) {
