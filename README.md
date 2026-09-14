@@ -87,5 +87,4 @@ offbeat/
 
 ## Roadmap
 
-This repository is implementing the milestone plan in `docs/IMPLEMENTATION_PLAN.md`.
-M0 (skeleton) is the only complete milestone. M1 (CLI/IPC) is next.
+This repository is implementing the milestone plan in `docs/IMPLEMENTATION_PLAN.md` and currently working on Milestone 2.
