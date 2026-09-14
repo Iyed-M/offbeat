@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,13 +27,23 @@ type Daemon struct {
 
 	lock      *Lock
 	socketDir string
+
+	adapterCredential string
+	adapterListener   net.Listener
+	adapterServer     *http.Server
+	adapterServeDone  chan struct{}
 }
 
 type Options struct {
 	ConfigPath string
 	HomeDir    string
 	Version    string
+	// AdapterCredential is development/test-provisioned secret material. M12
+	// will replace this source with setup-managed secret storage.
+	AdapterCredential string
 }
+
+var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
 
 func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 	loader := config.NewLoader(opts.HomeDir, opts.ConfigPath)
@@ -40,17 +51,21 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	if opts.AdapterCredential == "" {
+		return nil, ErrAdapterCredentialUnavailable
+	}
 
 	lock, err := AcquireLock(cfg.Paths.StateDir)
 	if err != nil {
 		return nil, err
 	}
 	d := &Daemon{
-		Cfg:       cfg,
-		lock:      lock,
-		socketDir: cfg.Paths.SocketDir,
-		startedAt: time.Now().UTC(),
-		version:   opts.Version,
+		Cfg:               cfg,
+		lock:              lock,
+		socketDir:         cfg.Paths.SocketDir,
+		adapterCredential: opts.AdapterCredential,
+		startedAt:         time.Now().UTC(),
+		version:           opts.Version,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -139,6 +154,22 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
+	if d.adapterServer != nil {
+		if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, fmt.Errorf("close adapter endpoint: %w", err))
+		}
+		d.adapterServer = nil
+	}
+	if d.adapterListener != nil {
+		if err := d.adapterListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, fmt.Errorf("close adapter listener: %w", err))
+		}
+		d.adapterListener = nil
+	}
+	if d.adapterServeDone != nil {
+		<-d.adapterServeDone
+		d.adapterServeDone = nil
+	}
 	if d.DB != nil {
 		if err := d.DB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close database: %w", err))
@@ -181,6 +212,22 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		"socket", SocketPath(d.socketDir),
 	)
 
+	adapterListener, err := BindAdapterListener(d.Cfg.SpotifyAdapter)
+	if err != nil {
+		return d.shutdown(fmt.Errorf("bind Spotify adapter listener: %w", err))
+	}
+	d.adapterListener = adapterListener
+	adapterServer := &http.Server{Handler: adapterHandler()}
+	adapterServeDone := make(chan struct{})
+	d.adapterServer = adapterServer
+	d.adapterServeDone = adapterServeDone
+	go func() {
+		defer close(adapterServeDone)
+		if err := adapterServer.Serve(adapterListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			d.Logger.Error("adapter endpoint serve failed", "err", err)
+		}
+	}()
+
 	stale, err := ResolveStaleSocket(d.socketDir)
 	if err != nil {
 		return d.shutdown(fmt.Errorf("resolve stale socket: %w", err))
@@ -215,6 +262,13 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	}
 
 	d.Logger.Info("offbeatd stopping", "phase", "stop_accept")
+	if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		d.Logger.Warn("close adapter endpoint", "err", err)
+	}
+	<-d.adapterServeDone
+	d.adapterServer = nil
+	d.adapterListener = nil
+	d.adapterServeDone = nil
 	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		d.Logger.Warn("listener close", "err", err)
 	}
@@ -238,6 +292,29 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		return fmt.Errorf("control socket accept loop: %w", acceptErr)
 	}
 	return nil
+}
+
+func adapterHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(AdapterRoute, func(w http.ResponseWriter, _ *http.Request) {
+		// M2's next ticket upgrades this route to the authenticated WebSocket
+		// protocol. Keeping the route live now makes readiness observable.
+		w.WriteHeader(http.StatusUpgradeRequired)
+	})
+	return mux
+}
+
+// BindAdapterListener binds the daemon-owned adapter transport. Protocol and
+// WebSocket handling are intentionally added by the following M2 ticket.
+func BindAdapterListener(adapter config.SpotifyAdapter) (net.Listener, error) {
+	if err := config.ValidateSpotifyAdapter(adapter); err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort(adapter.BindAddress, fmt.Sprintf("%d", adapter.Port)))
+	if err != nil {
+		return nil, err
+	}
+	return listener, nil
 }
 
 // shutdown releases daemon ownership when Run cannot serve. It exists for the

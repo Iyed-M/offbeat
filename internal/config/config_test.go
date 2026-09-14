@@ -29,6 +29,31 @@ func TestDefaults(t *testing.T) {
 	if cfg.Downloader.YTDLPPath != "yt-dlp" {
 		t.Errorf("YTDLPPath = %q", cfg.Downloader.YTDLPPath)
 	}
+	if cfg.SpotifyAdapter.BindAddress != "127.0.0.1" || cfg.SpotifyAdapter.Port != 16352 {
+		t.Errorf("SpotifyAdapter=%+v", cfg.SpotifyAdapter)
+	}
+}
+
+func TestValidateSpotifyAdapter(t *testing.T) {
+	tests := []struct {
+		name    string
+		adapter SpotifyAdapter
+		wantErr bool
+	}{
+		{"ipv4 loopback", SpotifyAdapter{BindAddress: "127.0.0.1", Port: 16352}, false},
+		{"ipv6 loopback", SpotifyAdapter{BindAddress: "::1", Port: 16352}, false},
+		{"non-loopback", SpotifyAdapter{BindAddress: "0.0.0.0", Port: 16352}, true},
+		{"hostname", SpotifyAdapter{BindAddress: "localhost", Port: 16352}, true},
+		{"zero port", SpotifyAdapter{BindAddress: "127.0.0.1", Port: 0}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSpotifyAdapter(tt.adapter)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateSpotifyAdapter() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestUserHomeDirOverride(t *testing.T) {

@@ -58,7 +58,7 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, offbeatdPath)
-	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home, "OFFBEAT_ADAPTER_CREDENTIAL=test-adapter-credential")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	cmd.Stdout = stdout
@@ -177,7 +177,7 @@ yt_dlp_path = "/usr/local/bin/yt-dlp"
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, offbeatdPath)
-	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home, "OFFBEAT_ADAPTER_CREDENTIAL=test-adapter-credential")
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
@@ -240,7 +240,7 @@ yt_dlp_path = "/original/yt-dlp"
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, offbeatdPath)
-	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home, "OFFBEAT_ADAPTER_CREDENTIAL=test-adapter-credential")
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {

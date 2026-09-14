@@ -26,9 +26,10 @@ func main() {
 	}
 
 	d, err := app.NewDaemon(context.Background(), app.Options{
-		ConfigPath: configPath,
-		HomeDir:    homeDir,
-		Version:    version,
+		ConfigPath:        configPath,
+		HomeDir:           homeDir,
+		Version:           version,
+		AdapterCredential: os.Getenv("OFFBEAT_ADAPTER_CREDENTIAL"),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeatd: %v\n", err)
