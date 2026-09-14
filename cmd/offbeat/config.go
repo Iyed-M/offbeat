@@ -24,13 +24,13 @@ import (
 //   - 1 when the daemon is unreachable or returns a runtime error
 //   - 2 on CLI usage errors (handled by main)
 func runConfig(configPath, homeDir string) int {
-	cfg, err := loadConfig(configPath, homeDir)
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat config: config: %v\n", err)
 		return 1
 	}
 
-	sockPath := app.SocketPath(cfg.Paths.SocketDir)
+	sockPath := app.SocketPath(bootstrap.SocketDir)
 
 	resp, err := requestControl(sockPath, "config")
 	if err != nil {

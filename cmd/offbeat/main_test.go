@@ -58,6 +58,7 @@ func TestMain(m *testing.M) {
 
 func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 	home := t.TempDir()
+	writeCLIAdapterConfig(t, home)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -103,6 +104,65 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 		// stderr should be empty on success
 		t.Errorf("unexpected stderr: %q", errOut)
 	}
+}
+
+func TestCLIStatusUsesBootstrapConfigWhenDaemonConfigBecomesInvalid(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "offbeat-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	configPath := writeCLIAdapterConfig(t, home)
+
+	cmd := exec.Command(offbeatdPath)
+	cmd.Env = append(os.Environ(), "OFFBEAT_HOME="+home, "OFFBEAT_ADAPTER_CREDENTIAL=test-adapter-credential")
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start offbeatd: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+	}()
+	if err := waitForDaemonReady(home, 5*time.Second); err != nil {
+		t.Fatalf("daemon not ready: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	if err := os.WriteFile(configPath, []byte("[spotify_adapter]\nport = 0\n"), 0o600); err != nil {
+		t.Fatalf("invalidate daemon-only config: %v", err)
+	}
+
+	out, errOut, err := runCLI(t, home, "status")
+	if err != nil {
+		t.Fatalf("offbeat status: %v\nstderr:\n%s", err, errOut)
+	}
+	if !strings.Contains(out, "Offbeat daemon") {
+		t.Errorf("status did not reach daemon:\n%s", out)
+	}
+	if errOut != "" {
+		t.Errorf("unexpected stderr: %q", errOut)
+	}
+}
+
+func writeCLIAdapterConfig(t *testing.T, home string) string {
+	t.Helper()
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve adapter port: %v", err)
+	}
+	port := reserved.Addr().(*net.TCPAddr).Port
+	if err := reserved.Close(); err != nil {
+		t.Fatalf("release adapter port: %v", err)
+	}
+	configPath := filepath.Join(home, ".config", "offbeat", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("[spotify_adapter]\nport = %d\n", port)), 0o600); err != nil {
+		t.Fatalf("write adapter config: %v", err)
+	}
+	return configPath
 }
 
 func TestCLISpotifySyncPrintsSyntheticSuccess(t *testing.T) {

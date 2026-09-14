@@ -30,13 +30,13 @@ const (
 //   - 1 when the daemon is unreachable or returns a runtime error
 //   - 2 on CLI usage errors (handled by main)
 func runStatus(configPath, homeDir string) int {
-	cfg, err := loadConfig(configPath, homeDir)
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat status: config: %v\n", err)
 		return 1
 	}
 
-	sockPath := app.SocketPath(cfg.Paths.SocketDir)
+	sockPath := app.SocketPath(bootstrap.SocketDir)
 
 	resp, err := requestControl(sockPath, "status")
 	if err != nil {
@@ -148,18 +148,18 @@ func adapterState(connected bool) string {
 	return "disconnected"
 }
 
-func loadConfig(configPath, homeDir string) (config.Config, error) {
+func loadBootstrapConfig(configPath, homeDir string) (config.Bootstrap, error) {
 	loader := config.NewLoader(homeDir, configPath)
-	cfg, err := loader.Load()
+	bootstrap, err := loader.LoadBootstrap()
 	if err != nil {
 		def := configPath
 		if def == "" {
 			def, _ = config.DefaultConfigPath()
 		}
 		if def != "" {
-			return cfg, fmt.Errorf("%w (using config %s)", err, def)
+			return bootstrap, fmt.Errorf("%w (using config %s)", err, def)
 		}
-		return cfg, err
+		return bootstrap, err
 	}
-	return cfg, nil
+	return bootstrap, nil
 }

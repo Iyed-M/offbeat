@@ -61,6 +61,13 @@ type Config struct {
 	Sync           Sync           `toml:"sync"`
 }
 
+// Bootstrap contains the only local configuration the CLI needs: where to
+// find the daemon owner's control socket. The daemon remains authoritative
+// for every other effective configuration value.
+type Bootstrap struct {
+	SocketDir string
+}
+
 func Defaults(home string) Config {
 	cfg := Config{}
 	cfg.Paths.ConfigDir = filepath.Join(home, ".config", AppDirName)
@@ -166,6 +173,42 @@ func (l *Loader) Load() (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// LoadBootstrap reads only the control socket location. It deliberately does
+// not validate daemon-only configuration, which may have changed since the
+// running daemon loaded its effective configuration.
+func (l *Loader) LoadBootstrap() (Bootstrap, error) {
+	home := l.home
+	if home == "" {
+		h, err := UserHomeDir()
+		if err != nil {
+			return Bootstrap{}, err
+		}
+		home = h
+	}
+
+	bootstrap := Bootstrap{SocketDir: Defaults(home).Paths.SocketDir}
+	configPath := l.configPath
+	if configPath == "" {
+		configPath = ConfigPath(home)
+	}
+	if !fileExists(configPath) {
+		return bootstrap, nil
+	}
+
+	var file struct {
+		Paths struct {
+			SocketDir string `toml:"socket_dir"`
+		} `toml:"paths"`
+	}
+	if err := applyTOMLPermissiveFromPath(configPath, &file); err != nil {
+		return Bootstrap{}, fmt.Errorf("parse config %s: %w", configPath, err)
+	}
+	if file.Paths.SocketDir != "" {
+		bootstrap.SocketDir = file.Paths.SocketDir
+	}
+	return bootstrap, nil
 }
 
 // ValidateSpotifyAdapter rejects endpoints that could expose the local adapter

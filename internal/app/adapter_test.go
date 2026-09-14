@@ -24,7 +24,9 @@ func TestAdapterAuthenticationSessionAndStatus(t *testing.T) {
 	first := dialAdapter(t, endpoint)
 	writeAdapterJSON(t, first, map[string]any{"version": 1, "type": "hello", "credential": testAdapterCredential})
 	assertAdapterMessage(t, first, "hello.accepted", "")
-	assertAdapterConnected(t, d, true)
+	// The session is published after hello.accepted is written, so wait for
+	// that asynchronous state transition rather than assuming both are atomic.
+	waitForAdapterConnected(t, d, true)
 
 	second := dialAdapter(t, endpoint)
 	writeAdapterJSON(t, second, map[string]any{"version": 1, "type": "hello", "credential": testAdapterCredential})
