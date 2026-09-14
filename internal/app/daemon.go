@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,6 +30,8 @@ type Daemon struct {
 
 	adapterCredential string
 	adapterListener   net.Listener
+	adapterServer     *http.Server
+	adapterServeDone  chan struct{}
 }
 
 type Options struct {
@@ -151,11 +154,21 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
+	if d.adapterServer != nil {
+		if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, fmt.Errorf("close adapter endpoint: %w", err))
+		}
+		d.adapterServer = nil
+	}
 	if d.adapterListener != nil {
 		if err := d.adapterListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			errs = append(errs, fmt.Errorf("close adapter listener: %w", err))
 		}
 		d.adapterListener = nil
+	}
+	if d.adapterServeDone != nil {
+		<-d.adapterServeDone
+		d.adapterServeDone = nil
 	}
 	if d.DB != nil {
 		if err := d.DB.Close(); err != nil {
@@ -204,6 +217,16 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		return d.shutdown(fmt.Errorf("bind Spotify adapter listener: %w", err))
 	}
 	d.adapterListener = adapterListener
+	adapterServer := &http.Server{Handler: adapterHandler()}
+	adapterServeDone := make(chan struct{})
+	d.adapterServer = adapterServer
+	d.adapterServeDone = adapterServeDone
+	go func() {
+		defer close(adapterServeDone)
+		if err := adapterServer.Serve(adapterListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			d.Logger.Error("adapter endpoint serve failed", "err", err)
+		}
+	}()
 
 	stale, err := ResolveStaleSocket(d.socketDir)
 	if err != nil {
@@ -239,10 +262,13 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 	}
 
 	d.Logger.Info("offbeatd stopping", "phase", "stop_accept")
-	if err := d.adapterListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		d.Logger.Warn("close adapter listener", "err", err)
+	if err := d.adapterServer.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		d.Logger.Warn("close adapter endpoint", "err", err)
 	}
+	<-d.adapterServeDone
+	d.adapterServer = nil
 	d.adapterListener = nil
+	d.adapterServeDone = nil
 	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		d.Logger.Warn("listener close", "err", err)
 	}
@@ -266,6 +292,16 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		return fmt.Errorf("control socket accept loop: %w", acceptErr)
 	}
 	return nil
+}
+
+func adapterHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(AdapterRoute, func(w http.ResponseWriter, _ *http.Request) {
+		// M2's next ticket upgrades this route to the authenticated WebSocket
+		// protocol. Keeping the route live now makes readiness observable.
+		w.WriteHeader(http.StatusUpgradeRequired)
+	})
+	return mux
 }
 
 // BindAdapterListener binds the daemon-owned adapter transport. Protocol and

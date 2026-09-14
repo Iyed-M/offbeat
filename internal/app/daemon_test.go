@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,12 +259,16 @@ func TestRunAdapterListenerIsReadyBeforeControlSocket(t *testing.T) {
 	d := startDaemonForTest(t, "0.0.0-m2")
 	waitForSocket(t, SocketPath(d.socketDir))
 
-	endpoint := net.JoinHostPort(d.Cfg.SpotifyAdapter.BindAddress, fmt.Sprintf("%d", d.Cfg.SpotifyAdapter.Port))
-	conn, err := net.DialTimeout("tcp", endpoint, time.Second)
+	endpoint := "http://" + net.JoinHostPort(d.Cfg.SpotifyAdapter.BindAddress, fmt.Sprintf("%d", d.Cfg.SpotifyAdapter.Port)) + AdapterRoute
+	resp, err := (&http.Client{Timeout: time.Second}).Get(endpoint)
 	if err != nil {
 		t.Fatalf("adapter listener unavailable while control socket is ready: %v", err)
 	}
-	_ = conn.Close()
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("adapter route status = %d, want %d", resp.StatusCode, http.StatusUpgradeRequired)
+	}
 }
 
 func assertResourcesReleased(t *testing.T, d *Daemon) {
