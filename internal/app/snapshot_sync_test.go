@@ -43,6 +43,19 @@ func TestSpotifySyncCompletesOnlyForMatchingCandidateResponse(t *testing.T) {
 	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
+func TestSpotifySyncReportsCorrelatedCollectionFailure(t *testing.T) {
+	d := startAdapterDaemon(t)
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+
+	done := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"error": map[string]any{"operation": "playlist", "offset": 100, "message": "request failed"},
+	})
+	assertSyncFailure(t, syncResponse(t, <-done), "rejected during playlist at offset 100")
+}
+
 func TestSpotifySyncRejectsConcurrentRequest(t *testing.T) {
 	d := startAdapterDaemon(t)
 	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
@@ -152,6 +165,15 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 				writeAdapterJSON(t, conn, map[string]any{
 					"version": 1, "type": "snapshot.response", "request_id": requestID,
 					"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{"position": 1, "kind": "unsupported"}}}},
+				})
+			},
+		},
+		{
+			name: "unsupported entry with unknown field",
+			response: func(t *testing.T, conn *websocket.Conn, requestID string) {
+				writeAdapterJSON(t, conn, map[string]any{
+					"version": 1, "type": "snapshot.response", "request_id": requestID,
+					"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{"position": 0, "kind": "unsupported", "unexpected": true}}}},
 				})
 			},
 		},

@@ -41,13 +41,13 @@ function createPeer() {
   };
 }
 
-function start(peer) {
+function start(peer, platform) {
   var adapter = createAdapter({ endpoint: "ws://127.0.0.1:16352/v1/adapter", credential: "development-credential" }, {
     WebSocket: peer.WebSocket,
     setTimeout: peer.setTimeout,
     clearTimeout: peer.clearTimeout,
     logger: { error: function () {}, warn: function () {} },
-    Platform: emptyPlatform()
+    Platform: platform || emptyPlatform()
   });
   adapter.start();
   return adapter;
@@ -110,6 +110,26 @@ test("rejects malformed pages and unavailable Platform APIs", async function () 
     PlaylistAPI: { getContents: async function () { return { items: [], totalLength: 1 }; } },
     LibraryAPI: { getTracks: async function () { return { items: [], totalLength: 0 }; } }
   }), /inconsistent pagination/);
+});
+
+test("sends one bounded collection error instead of a partial candidate", async function () {
+  var peer = createPeer();
+  start(peer, {
+    RootlistAPI: { getContents: async function () { return { items: [{ type: "playlist", uri: "spotify:playlist:one", name: "One" }] }; } },
+    PlaylistAPI: { getContents: async function () { throw new Error("private API stack"); } },
+    LibraryAPI: { getTracks: async function () { return { items: [], totalLength: 0 }; } }
+  });
+  var socket = peer.sockets[0];
+  socket.open();
+  socket.receive({ version: 1, type: "hello.accepted" });
+  socket.receive({ version: 1, type: "snapshot.request", request_id: "failed-request" });
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.deepEqual(socket.sent[1], {
+    version: 1,
+    type: "snapshot.response",
+    request_id: "failed-request",
+    error: { operation: "playlist", offset: 0, message: "request failed" }
+  });
 });
 
 test("reconnects after transport loss with capped backoff and resets after authentication", function () {

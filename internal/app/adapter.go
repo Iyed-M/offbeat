@@ -471,6 +471,11 @@ func validEntries(entries []json.RawMessage) bool {
 			if len(entry) != 2 && len(entry) != 3 {
 				return false
 			}
+			for name := range entry {
+				if name != "position" && name != "kind" && name != "source_uri" {
+					return false
+				}
+			}
 			if value, ok := entry["source_uri"]; ok {
 				var sourceURI string
 				if json.Unmarshal(value, &sourceURI) != nil || sourceURI == "" {
