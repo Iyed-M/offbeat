@@ -90,16 +90,17 @@ test("collects nested playlists and paginated liked songs without dropping dupli
     PlaylistAPI: { getContents: async function (uri, request) {
       calls.push([uri, request.offset]);
       if (uri === "spotify:playlist:empty") return { items: [], totalLength: 0 };
-      return { items: [supportedTrack("spotify:track:duplicate", "Duplicate"), supportedTrack("spotify:track:duplicate", "Duplicate"), { type: "episode", uri: "spotify:episode:one" }], totalLength: 3 };
+      if (request.offset === 0) return { items: [supportedTrack("spotify:track:duplicate", "Duplicate")], totalLength: 3 };
+      return { items: [supportedTrack("spotify:track:duplicate", "Duplicate"), { type: "episode" }], totalLength: 3 };
     } },
     LibraryAPI: { getTracks: async function (request) {
       if (request.offset === 0) return { items: [supportedTrack("spotify:track:liked", "Liked")], totalLength: 2 };
       return { items: [{ type: "track", uri: "spotify:track:unplayable", isPlayable: false }], totalLength: 2 };
     } }
   });
-  assert.deepEqual(calls, [["spotify:playlist:nested", 0], ["spotify:playlist:empty", 0]]);
+  assert.deepEqual(calls, [["spotify:playlist:nested", 0], ["spotify:playlist:nested", 1], ["spotify:playlist:empty", 0]]);
   assert.equal(snapshot.playlists[0].entries[1].track.uri, "spotify:track:duplicate");
-  assert.deepEqual(snapshot.playlists[0].entries[2], { position: 2, kind: "unsupported", source_uri: "spotify:episode:one" });
+  assert.deepEqual(snapshot.playlists[0].entries[2], { position: 2, kind: "unsupported" });
   assert.deepEqual(snapshot.liked_songs.entries[1], { position: 1, kind: "unsupported", source_uri: "spotify:track:unplayable" });
 });
 
@@ -110,6 +111,25 @@ test("rejects malformed pages and unavailable Platform APIs", async function () 
     PlaylistAPI: { getContents: async function () { return { items: [], totalLength: 1 }; } },
     LibraryAPI: { getTracks: async function () { return { items: [], totalLength: 0 }; } }
   }), /inconsistent pagination/);
+});
+
+test("rejects malformed rootlists, items, and page counters", async function () {
+  var base = emptyPlatform();
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [{ type: "folder" }] }; } },
+    PlaylistAPI: base.PlaylistAPI,
+    LibraryAPI: base.LibraryAPI
+  }), /response could not be interpreted/);
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [{ type: "playlist", uri: "spotify:playlist:one", name: "One" }] }; } },
+    PlaylistAPI: { getContents: async function () { return { items: [{ item: null }], totalLength: 1 }; } },
+    LibraryAPI: base.LibraryAPI
+  }), /response could not be interpreted/);
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: base.PlaylistAPI,
+    LibraryAPI: { getTracks: async function () { return { items: [] }; } }
+  }), /response could not be interpreted/);
 });
 
 test("sends one bounded collection error instead of a partial candidate", async function () {
