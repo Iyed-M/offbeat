@@ -32,14 +32,14 @@ func TestReservedAdapterHandshakeIsNotConnectedOrSyncable(t *testing.T) {
 	assertSyncFailure(t, response, "Spotify adapter is not connected.")
 }
 
-func TestSpotifySyncCompletesOnlyForMatchingSyntheticResponse(t *testing.T) {
+func TestSpotifySyncCompletesOnlyForMatchingCandidateResponse(t *testing.T) {
 	d := startAdapterDaemon(t)
 	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
 
 	done := sendSync(t, d)
 	request := readAdapterMessage(t, adapter)
 	requestID := assertSnapshotRequest(t, request)
-	writeSyntheticResponse(t, adapter, requestID)
+	writeCandidateResponse(t, adapter, requestID)
 	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
@@ -51,7 +51,7 @@ func TestSpotifySyncRejectsConcurrentRequest(t *testing.T) {
 	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
 	response := sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"spotify.sync"}`+"\n"))
 	assertSyncFailure(t, response, "already in progress")
-	writeSyntheticResponse(t, adapter, requestID)
+	writeCandidateResponse(t, adapter, requestID)
 	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
@@ -143,15 +143,15 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 		{
 			name: "unmatched ID",
 			response: func(t *testing.T, conn *websocket.Conn, _ string) {
-				writeSyntheticResponse(t, conn, "wrong-request-id")
+				writeCandidateResponse(t, conn, "wrong-request-id")
 			},
 		},
 		{
-			name: "non synthetic payload",
+			name: "invalid candidate payload",
 			response: func(t *testing.T, conn *websocket.Conn, requestID string) {
 				writeAdapterJSON(t, conn, map[string]any{
 					"version": 1, "type": "snapshot.response", "request_id": requestID,
-					"snapshot": map[string]any{"kind": "synthetic", "marker": "wrong"},
+					"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{"position": 1, "kind": "unsupported"}}}},
 				})
 			},
 		},
@@ -171,9 +171,9 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 		adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
 		done := sendSync(t, d)
 		requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
-		writeSyntheticResponse(t, adapter, requestID)
+		writeCandidateResponse(t, adapter, requestID)
 		assertSyncSuccess(t, syncResponse(t, <-done))
-		writeSyntheticResponse(t, adapter, requestID)
+		writeCandidateResponse(t, adapter, requestID)
 		assertAdapterMessage(t, adapter, "error", adapterErrorInvalidMessage)
 	})
 }
@@ -193,9 +193,9 @@ func TestObsoleteAdapterSessionCannotSatisfyLaterSync(t *testing.T) {
 
 	done := sendSync(t, d)
 	requestID := assertSnapshotRequest(t, readAdapterMessage(t, current))
-	writeSyntheticResponse(t, old, requestID)
+	writeCandidateResponse(t, old, requestID)
 	assertAdapterMessage(t, old, "error", adapterErrorInvalidMessage)
-	writeSyntheticResponse(t, current, requestID)
+	writeCandidateResponse(t, current, requestID)
 	assertSyncSuccess(t, syncResponse(t, <-done))
 }
 
@@ -258,11 +258,15 @@ func assertSnapshotRequest(t *testing.T, message map[string]any) string {
 	return requestID
 }
 
-func writeSyntheticResponse(t *testing.T, conn *websocket.Conn, requestID string) {
+func writeCandidateResponse(t *testing.T, conn *websocket.Conn, requestID string) {
 	t.Helper()
 	writeAdapterJSON(t, conn, map[string]any{
 		"version": 1, "type": "snapshot.response", "request_id": requestID,
-		"snapshot": map[string]any{"kind": "synthetic", "marker": "offbeat-m2"},
+		"snapshot": map[string]any{
+			"kind":        "candidate",
+			"playlists":   []any{},
+			"liked_songs": map[string]any{"entries": []any{}},
+		},
 	})
 }
 

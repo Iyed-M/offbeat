@@ -46,13 +46,26 @@ function start(peer) {
     WebSocket: peer.WebSocket,
     setTimeout: peer.setTimeout,
     clearTimeout: peer.clearTimeout,
-    logger: { error: function () {}, warn: function () {} }
+    logger: { error: function () {}, warn: function () {} },
+    Platform: emptyPlatform()
   });
   adapter.start();
   return adapter;
 }
 
-test("sends the exact hello and only answers correlated snapshot requests after acceptance", function () {
+function emptyPlatform() {
+  return {
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: { getContents: async function () { return { items: [], totalLength: 0 }; } },
+    LibraryAPI: { getTracks: async function () { return { items: [], totalLength: 0 }; } }
+  };
+}
+
+function supportedTrack(uri, name) {
+  return { type: "track", uri: uri, name: name, duration_ms: 1000, artists: [{ uri: "spotify:artist:one", name: "Artist" }], album: { uri: "spotify:album:one", name: "Album" } };
+}
+
+test("sends a normalized candidate only for correlated snapshot requests after acceptance", async function () {
   var peer = createPeer();
   start(peer);
   var socket = peer.sockets[0];
@@ -61,12 +74,42 @@ test("sends the exact hello and only answers correlated snapshot requests after 
 
   socket.receive({ version: 1, type: "hello.accepted" });
   socket.receive({ version: 1, type: "snapshot.request", request_id: "opaque-request-id" });
-  assert.deepEqual(socket.sent[1], {
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.deepEqual(socket.sent[2], {
     version: 1,
     type: "snapshot.response",
     request_id: "opaque-request-id",
-    snapshot: { kind: "synthetic", marker: "offbeat-m2" }
+    snapshot: { kind: "candidate", playlists: [], liked_songs: { entries: [] } }
   });
+});
+
+test("collects nested playlists and paginated liked songs without dropping duplicates or unsupported entries", async function () {
+  var calls = [];
+  var snapshot = await require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [{ type: "folder", items: [{ type: "playlist", uri: "spotify:playlist:nested", name: "Nested" }] }, { type: "playlist", uri: "spotify:playlist:empty", name: "Empty" }] }; } },
+    PlaylistAPI: { getContents: async function (uri, request) {
+      calls.push([uri, request.offset]);
+      if (uri === "spotify:playlist:empty") return { items: [], totalLength: 0 };
+      return { items: [supportedTrack("spotify:track:duplicate", "Duplicate"), supportedTrack("spotify:track:duplicate", "Duplicate"), { type: "episode", uri: "spotify:episode:one" }], totalLength: 3 };
+    } },
+    LibraryAPI: { getTracks: async function (request) {
+      if (request.offset === 0) return { items: [supportedTrack("spotify:track:liked", "Liked")], totalLength: 2 };
+      return { items: [{ type: "track", uri: "spotify:track:unplayable", isPlayable: false }], totalLength: 2 };
+    } }
+  });
+  assert.deepEqual(calls, [["spotify:playlist:nested", 0], ["spotify:playlist:empty", 0]]);
+  assert.equal(snapshot.playlists[0].entries[1].track.uri, "spotify:track:duplicate");
+  assert.deepEqual(snapshot.playlists[0].entries[2], { position: 2, kind: "unsupported", source_uri: "spotify:episode:one" });
+  assert.deepEqual(snapshot.liked_songs.entries[1], { position: 1, kind: "unsupported", source_uri: "spotify:track:unplayable" });
+});
+
+test("rejects malformed pages and unavailable Platform APIs", async function () {
+  await assert.rejects(require("./offbeat.js").collectSnapshot({}), /required Spotify Platform API/);
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [{ type: "playlist", uri: "spotify:playlist:one", name: "One" }] }; } },
+    PlaylistAPI: { getContents: async function () { return { items: [], totalLength: 1 }; } },
+    LibraryAPI: { getTracks: async function () { return { items: [], totalLength: 0 }; } }
+  }), /inconsistent pagination/);
 });
 
 test("reconnects after transport loss with capped backoff and resets after authentication", function () {

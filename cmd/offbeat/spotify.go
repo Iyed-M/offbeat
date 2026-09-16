@@ -27,6 +27,6 @@ func runSpotifySync(configPath, homeDir string) int {
 		fmt.Fprintf(os.Stderr, "offbeat spotify sync: unexpected daemon reply: unsupported protocol version %d\n", resp.Version)
 		return 1
 	}
-	fmt.Fprintln(os.Stdout, "Spotify synthetic snapshot received.")
+	fmt.Fprintln(os.Stdout, "Spotify candidate snapshot received.")
 	return 0
 }

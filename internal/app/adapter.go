@@ -203,7 +203,7 @@ func (s *adapterSession) write(ctx context.Context, value any) error {
 	return writeAdapterMessage(ctx, s.conn, value)
 }
 
-// handleSpotifySync owns the one M2 request until the matching response,
+// handleSpotifySync owns the one M3 request until the matching response,
 // disconnect, timeout, or daemon shutdown completes it.
 func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 	requestID, err := newSnapshotRequestID()
@@ -277,7 +277,7 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 	}
 	d.pendingSnapshot = nil
 	d.adapterMu.Unlock()
-	pending.result <- nil
+	pending.result <- response.Err
 	return ""
 }
 
@@ -366,6 +366,7 @@ func parseAdapterLog(data []byte) (slog.Level, string, string) {
 
 type snapshotResponse struct {
 	RequestID string
+	Err       error
 }
 
 func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
@@ -386,7 +387,7 @@ func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
 	for key := range fields {
-		if key != "version" && key != "type" && key != "request_id" && key != "snapshot" {
+		if key != "version" && key != "type" && key != "request_id" && key != "snapshot" && key != "error" {
 			return snapshotResponse{}, adapterErrorInvalidMessage
 		}
 	}
@@ -404,18 +405,147 @@ func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
 	if err := json.Unmarshal(fields["request_id"], &requestID); err != nil || requestID == "" {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
-	var snapshot map[string]json.RawMessage
-	if err := json.Unmarshal(fields["snapshot"], &snapshot); err != nil || len(snapshot) != 2 {
+	if snapshot, ok := fields["snapshot"]; ok {
+		if _, ok := fields["error"]; ok || parseCandidateSnapshot(snapshot) != nil {
+			return snapshotResponse{}, adapterErrorInvalidMessage
+		}
+		return snapshotResponse{RequestID: requestID}, ""
+	}
+	collectionErr, ok := parseCollectionError(fields["error"])
+	if !ok {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
-	var kind, marker string
-	if err := json.Unmarshal(snapshot["kind"], &kind); err != nil || kind != "synthetic" {
-		return snapshotResponse{}, adapterErrorInvalidMessage
+	return snapshotResponse{RequestID: requestID, Err: collectionErr}, ""
+}
+
+// parseCandidateSnapshot deliberately accepts only normalized M3 data. Spotify
+// Desktop objects stay contained in the extension-local adapter.
+func parseCandidateSnapshot(data json.RawMessage) error {
+	var snapshot struct {
+		Kind       string            `json:"kind"`
+		Playlists  []json.RawMessage `json:"playlists"`
+		LikedSongs json.RawMessage   `json:"liked_songs"`
 	}
-	if err := json.Unmarshal(snapshot["marker"], &marker); err != nil || marker != "offbeat-m2" {
-		return snapshotResponse{}, adapterErrorInvalidMessage
+	if !decodeExactObject(data, &snapshot, "kind", "playlists", "liked_songs") || snapshot.Kind != "candidate" || snapshot.Playlists == nil {
+		return errors.New("invalid candidate snapshot")
 	}
-	return snapshotResponse{RequestID: requestID}, ""
+	for _, playlist := range snapshot.Playlists {
+		var item struct {
+			URI     string            `json:"uri"`
+			Name    string            `json:"name"`
+			Entries []json.RawMessage `json:"entries"`
+		}
+		if !decodeExactObject(playlist, &item, "uri", "name", "entries") || item.URI == "" || item.Name == "" || item.Entries == nil || !validEntries(item.Entries) {
+			return errors.New("invalid candidate playlist")
+		}
+	}
+	var liked struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if !decodeExactObject(snapshot.LikedSongs, &liked, "entries") || liked.Entries == nil || !validEntries(liked.Entries) {
+		return errors.New("invalid liked songs")
+	}
+	return nil
+}
+
+func validEntries(entries []json.RawMessage) bool {
+	for position, raw := range entries {
+		var entry map[string]json.RawMessage
+		if json.Unmarshal(raw, &entry) != nil {
+			return false
+		}
+		var actualPosition int
+		if value, ok := entry["position"]; !ok || json.Unmarshal(value, &actualPosition) != nil || actualPosition != position {
+			return false
+		}
+		var kind string
+		if value, ok := entry["kind"]; !ok || json.Unmarshal(value, &kind) != nil {
+			return false
+		}
+		switch kind {
+		case "supported":
+			if len(entry) != 3 || validTrack(entry["track"]) == false {
+				return false
+			}
+		case "unsupported":
+			if len(entry) != 2 && len(entry) != 3 {
+				return false
+			}
+			if value, ok := entry["source_uri"]; ok {
+				var sourceURI string
+				if json.Unmarshal(value, &sourceURI) != nil || sourceURI == "" {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validTrack(data json.RawMessage) bool {
+	var track struct {
+		URI        string            `json:"uri"`
+		Name       string            `json:"name"`
+		Artists    []json.RawMessage `json:"artists"`
+		Album      json.RawMessage   `json:"album"`
+		DurationMS int               `json:"duration_ms"`
+	}
+	if !decodeExactObject(data, &track, "uri", "name", "artists", "album", "duration_ms") || track.URI == "" || track.Name == "" || track.DurationMS <= 0 || len(track.Artists) == 0 {
+		return false
+	}
+	for _, artist := range track.Artists {
+		if !validNamedURI(artist) {
+			return false
+		}
+	}
+	return validNamedURI(track.Album)
+}
+
+func validNamedURI(data json.RawMessage) bool {
+	var value struct {
+		URI  string `json:"uri"`
+		Name string `json:"name"`
+	}
+	return decodeExactObject(data, &value, "uri", "name") && value.URI != "" && value.Name != ""
+}
+
+func parseCollectionError(data json.RawMessage) (error, bool) {
+	var value struct {
+		Operation string `json:"operation"`
+		Offset    *int   `json:"offset"`
+		Message   string `json:"message"`
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || len(fields) < 2 || len(fields) > 3 || fields["operation"] == nil || fields["message"] == nil {
+		return nil, false
+	}
+	for key := range fields {
+		if key != "operation" && key != "offset" && key != "message" {
+			return nil, false
+		}
+	}
+	if json.Unmarshal(data, &value) != nil || value.Operation == "" || value.Message == "" || (value.Offset != nil && *value.Offset < 0) {
+		return nil, false
+	}
+	if value.Offset == nil {
+		return fmt.Errorf("Spotify snapshot rejected during %s: %s", value.Operation, value.Message), true
+	}
+	return fmt.Errorf("Spotify snapshot rejected during %s at offset %d: %s", value.Operation, *value.Offset, value.Message), true
+}
+
+func decodeExactObject(data json.RawMessage, target any, names ...string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || len(fields) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if _, ok := fields[name]; !ok {
+			return false
+		}
+	}
+	return json.Unmarshal(data, target) == nil
 }
 
 func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {

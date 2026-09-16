@@ -165,7 +165,7 @@ func writeCLIAdapterConfig(t *testing.T, home string) string {
 	return configPath
 }
 
-func TestCLISpotifySyncPrintsSyntheticSuccess(t *testing.T) {
+func TestCLISpotifySyncPrintsCandidateSuccess(t *testing.T) {
 	home := t.TempDir()
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -224,10 +224,10 @@ func TestCLISpotifySyncPrintsSyntheticSuccess(t *testing.T) {
 	}
 	writeCLIAdapterJSON(t, adapter, map[string]any{
 		"version": 1, "type": "snapshot.response", "request_id": requestID,
-		"snapshot": map[string]any{"kind": "synthetic", "marker": "offbeat-m2"},
+		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{}}},
 	})
 	result := <-done
-	if result.err != nil || result.errOut != "" || result.out != "Spotify synthetic snapshot received.\n" {
+	if result.err != nil || result.errOut != "" || result.out != "Spotify candidate snapshot received.\n" {
 		t.Fatalf("offbeat spotify sync = stdout %q stderr %q err %v", result.out, result.errOut, result.err)
 	}
 }

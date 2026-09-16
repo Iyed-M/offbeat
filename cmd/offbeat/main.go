@@ -73,7 +73,7 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  status    report daemon/database status through the control socket")
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
-	fmt.Println("  spotify sync  request a synthetic Spotify snapshot from the adapter")
+	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }
