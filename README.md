@@ -8,16 +8,17 @@ the same network. Spotify stays the source of truth. `offbeat` owns only the
 local representation.
 
 This repository is at **Milestone 2**. The daemon, CLI, and Spicetify extension
-can prove their authenticated local transport with a synthetic snapshot only.
-They do not yet collect, persist, or reconcile real Spotify state.
+can prove their authenticated local transport. A throwaway extension prototype
+also collects and logs visible playlists and their entries; it does not persist
+or reconcile Spotify state.
 
 ## Components
 
 | Component | Path             | Status |
 |-----------|------------------|--------|
 | Daemon    | `cmd/offbeatd`   | lifecycle, Control protocol, and local adapter endpoint |
-| CLI       | `cmd/offbeat`    | `status`, `config`, and synthetic `spotify sync` |
-| Extension | `spicetify/offbeat` | M2 synthetic WebSocket adapter |
+| CLI       | `cmd/offbeat`    | `status`, `config`, and prototype `spotify sync` log |
+| Extension | `spicetify/offbeat` | M2 WebSocket adapter + playlist collector prototype |
 | Domain    | `internal/domain`| typed IDs and value types |
 | Config    | `internal/config`| TOML loader with defaults |
 | DB        | `internal/db`    | SQLite + migration runner |

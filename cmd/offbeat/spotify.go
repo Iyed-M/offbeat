@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -27,6 +28,11 @@ func runSpotifySync(configPath, homeDir string) int {
 		fmt.Fprintf(os.Stderr, "offbeat spotify sync: unexpected daemon reply: unsupported protocol version %d\n", resp.Version)
 		return 1
 	}
-	fmt.Fprintln(os.Stdout, "Spotify synthetic snapshot received.")
+	data, err := json.MarshalIndent(resp.Result, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat spotify sync: invalid daemon snapshot: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "Spotify snapshot:\n%s\n", data)
 	return 0
 }

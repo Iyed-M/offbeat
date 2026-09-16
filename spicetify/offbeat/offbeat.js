@@ -5,6 +5,100 @@
   var INITIAL_RECONNECT_DELAY_MS = 1000;
   var MAX_RECONNECT_DELAY_MS = 30000;
   var MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+  var PAGE_SIZE = 100;
+
+  // PROTOTYPE: Keep Spotify Desktop's private Platform API at this boundary.
+  // Later milestones can replace this normalized shape without touching IPC.
+  function createSpotifyAdapter(platform) {
+    function fail(message) {
+      throw new Error("Offbeat snapshot collection: " + message);
+    }
+
+    function text(value) {
+      return typeof value === "string" ? value : null;
+    }
+
+    function normalizeEntry(item, position) {
+      var uri = item && text(item.uri);
+      var artists = item && Array.isArray(item.artists) ? item.artists.map(function (artist) {
+        return text(artist) || text(artist && artist.name);
+      }).filter(Boolean) : [];
+      return {
+        position: position,
+        uri: uri,
+        supported: Boolean(item && item.isPlayable && uri && uri.indexOf("spotify:track:") === 0),
+        name: item && (text(item.name) || text(item.title)),
+        artists: artists
+      };
+    }
+
+    function collectPlaylists(items, path, playlists) {
+      if (!Array.isArray(items)) {
+        fail("rootlist items are missing");
+      }
+      items.forEach(function (item, index) {
+        if (!item || typeof item !== "object") {
+          fail("rootlist item " + index + " is malformed");
+        }
+        if (item.type === "playlist") {
+          if (!text(item.uri)) {
+            fail("playlist " + index + " has no URI");
+          }
+          playlists.push({ uri: item.uri, name: text(item.name), path: path.concat(index) });
+        } else if (item.type === "folder") {
+          collectPlaylists(item.items, path.concat(index), playlists);
+        }
+      });
+    }
+
+    async function fetchPlaylist(playlist) {
+      var entries = [];
+      var offset = 0;
+      var total = null;
+      while (total === null || offset < total) {
+        var page = await platform.PlaylistAPI.getContents(playlist.uri, { offset: offset, limit: PAGE_SIZE });
+        if (!page || !Array.isArray(page.items) || typeof page.totalLength !== "number" || page.totalLength < 0) {
+          fail("playlist " + playlist.uri + " returned a malformed page at offset " + offset);
+        }
+        if (total !== null && total !== page.totalLength) {
+          fail("playlist " + playlist.uri + " changed size during collection");
+        }
+        total = page.totalLength;
+        if (page.items.length === 0 && offset < total) {
+          fail("playlist " + playlist.uri + " returned an empty page at offset " + offset);
+        }
+        page.items.forEach(function (item, index) {
+          entries.push(normalizeEntry(item, offset + index));
+        });
+        offset += page.items.length;
+        if (offset > total) {
+          fail("playlist " + playlist.uri + " returned too many entries");
+        }
+      }
+      return { uri: playlist.uri, name: playlist.name, path: playlist.path, entries: entries };
+    }
+
+    return {
+      collectSnapshot: async function () {
+        if (!platform || !platform.RootlistAPI || !platform.PlaylistAPI || typeof platform.RootlistAPI.getContents !== "function" || typeof platform.PlaylistAPI.getContents !== "function") {
+          fail("Spotify Desktop collection APIs are unavailable");
+        }
+        if (typeof platform.PlaylistAPI.getCapabilities === "function") {
+          var capabilities = await platform.PlaylistAPI.getCapabilities();
+          if (!capabilities || capabilities.canFetchAllTracks !== true) {
+            fail("Spotify Desktop cannot fetch complete playlist tracks");
+          }
+        }
+        var root = await platform.RootlistAPI.getContents();
+        var playlists = [];
+        collectPlaylists(root && root.items, [], playlists);
+        return {
+          captured_at: new Date().toISOString(),
+          playlists: await Promise.all(playlists.map(fetchPlaylist))
+        };
+      }
+    };
+  }
 
   function createAdapter(config, dependencies) {
     if (!config || typeof config.endpoint !== "string" || typeof config.credential !== "string") {
@@ -21,6 +115,7 @@
     var authenticated = false;
     var stopped = false;
     var permanentlyRejected = false;
+    var spotifyAdapter = dependencies.spotifyAdapter || createSpotifyAdapter(global.Spicetify && global.Spicetify.Platform);
 
     function log(level, message) {
       if (logger && typeof logger[level] === "function") {
@@ -102,14 +197,16 @@
       }
 
       if (message.type === "snapshot.request" && authenticated && typeof message.request_id === "string" && Object.keys(message).length === 3) {
-        send({
-          version: PROTOCOL_VERSION,
-          type: "snapshot.response",
-          request_id: message.request_id,
-          snapshot: {
-            kind: "synthetic",
-            marker: "offbeat-m2"
-          }
+        spotifyAdapter.collectSnapshot().then(function (snapshot) {
+          send({
+            version: PROTOCOL_VERSION,
+            type: "snapshot.response",
+            request_id: message.request_id,
+            snapshot: snapshot
+          });
+        }).catch(function (error) {
+          log("error", error.message);
+          if (socket) socket.close();
         });
         return;
       }
@@ -189,7 +286,7 @@
   }
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { createAdapter: createAdapter };
+    module.exports = { createAdapter: createAdapter, createSpotifyAdapter: createSpotifyAdapter };
   }
 
   startConfiguredAdapter();

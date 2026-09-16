@@ -41,31 +41,33 @@ function createPeer() {
   };
 }
 
-function start(peer) {
+function start(peer, spotifyAdapter) {
   var adapter = createAdapter({ endpoint: "ws://127.0.0.1:16352/v1/adapter", credential: "development-credential" }, {
     WebSocket: peer.WebSocket,
     setTimeout: peer.setTimeout,
     clearTimeout: peer.clearTimeout,
-    logger: { error: function () {}, warn: function () {} }
+    logger: { error: function () {}, warn: function () {} },
+    spotifyAdapter: spotifyAdapter
   });
   adapter.start();
   return adapter;
 }
 
-test("sends the exact hello and only answers correlated snapshot requests after acceptance", function () {
+test("sends the exact hello and forwards a correlated collected snapshot after acceptance", async function () {
   var peer = createPeer();
-  start(peer);
+  start(peer, { collectSnapshot: function () { return Promise.resolve({ playlists: [] }); } });
   var socket = peer.sockets[0];
   socket.open();
   assert.deepEqual(socket.sent, [{ version: 1, type: "hello", credential: "development-credential" }]);
 
   socket.receive({ version: 1, type: "hello.accepted" });
   socket.receive({ version: 1, type: "snapshot.request", request_id: "opaque-request-id" });
+  await Promise.resolve();
   assert.deepEqual(socket.sent[1], {
     version: 1,
     type: "snapshot.response",
     request_id: "opaque-request-id",
-    snapshot: { kind: "synthetic", marker: "offbeat-m2" }
+    snapshot: { playlists: [] }
   });
 });
 

@@ -1,9 +1,11 @@
-# M2 Spicetify Synthetic Adapter
+# Throwaway Spicetify Snapshot Prototype
 
-This directory contains the dependency-free Milestone 2 extension. It uses the
-browser-native `WebSocket` API only. It does not call Spotify APIs, inspect
-Spotify data, access files or SQLite, communicate with Android, or send an
-unsolicited snapshot.
+This directory contains a dependency-free, throwaway prototype layered on the
+Milestone 2 transport. On a daemon-issued request it enumerates the visible
+playlist rootlist, follows folders, fetches every playlist page, and returns
+the normalized ordered entries. `offbeat spotify sync` prints that snapshot.
+It does not persist data, fetch Liked Songs, reconcile, access files or
+SQLite, communicate with Android, or send an unsolicited snapshot.
 
 ## Development-only setup
 
@@ -50,8 +52,8 @@ Spicetify configuration, and `offbeat setup`.
    offbeat spotify sync
    ```
 
-   The expected output is `Spotify adapter: connected` followed by `Spotify
-   synthetic snapshot received.` Stop Spotify and verify status becomes
+    The expected output is `Spotify adapter: connected` followed by a `Spotify
+    snapshot:` JSON log. Stop Spotify and verify status becomes
    `Spotify adapter: disconnected`; restart Spotify, wait for reconnection, and
    run the sync command again.
 

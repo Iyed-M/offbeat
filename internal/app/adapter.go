@@ -29,7 +29,12 @@ type adapterSession struct {
 type pendingSnapshot struct {
 	session   *adapterSession
 	requestID string
-	result    chan error
+	result    chan snapshotResult
+}
+
+type snapshotResult struct {
+	snapshot json.RawMessage
+	err      error
 }
 
 func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -209,7 +214,7 @@ func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate snapshot request ID: %w", err)
 	}
-	pending := &pendingSnapshot{requestID: requestID, result: make(chan error, 1)}
+	pending := &pendingSnapshot{requestID: requestID, result: make(chan snapshotResult, 1)}
 
 	d.adapterMu.Lock()
 	if d.adapterStopping || d.adapterSession == nil {
@@ -233,11 +238,13 @@ func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 	timer := time.NewTimer(d.snapshotTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-pending.result:
-		if err != nil {
-			return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
+	case result := <-pending.result:
+		if result.err != nil {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, result.err.Error())
 		}
-		return struct{}{}, nil
+		return struct {
+			Snapshot json.RawMessage `json:"snapshot"`
+		}{Snapshot: result.snapshot}, nil
 	case <-timer.C:
 		message := "Timed out waiting for Spotify adapter snapshot response."
 		d.completePendingSnapshot(pending, errors.New(message))
@@ -276,12 +283,13 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 	}
 	d.pendingSnapshot = nil
 	d.adapterMu.Unlock()
-	pending.result <- nil
+	pending.result <- snapshotResult{snapshot: response.Snapshot}
 	return ""
 }
 
 type snapshotResponse struct {
 	RequestID string
+	Snapshot  json.RawMessage
 }
 
 func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
@@ -320,18 +328,15 @@ func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
 	if err := json.Unmarshal(fields["request_id"], &requestID); err != nil || requestID == "" {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
-	var snapshot map[string]json.RawMessage
-	if err := json.Unmarshal(fields["snapshot"], &snapshot); err != nil || len(snapshot) != 2 {
+	var snapshot json.RawMessage
+	if err := json.Unmarshal(fields["snapshot"], &snapshot); err != nil || !json.Valid(snapshot) {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
-	var kind, marker string
-	if err := json.Unmarshal(snapshot["kind"], &kind); err != nil || kind != "synthetic" {
+	var snapshotObject map[string]json.RawMessage
+	if err := json.Unmarshal(snapshot, &snapshotObject); err != nil || snapshotObject == nil {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
-	if err := json.Unmarshal(snapshot["marker"], &marker); err != nil || marker != "offbeat-m2" {
-		return snapshotResponse{}, adapterErrorInvalidMessage
-	}
-	return snapshotResponse{RequestID: requestID}, ""
+	return snapshotResponse{RequestID: requestID, Snapshot: snapshot}, ""
 }
 
 func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {
@@ -342,7 +347,7 @@ func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {
 	}
 	d.pendingSnapshot = nil
 	d.adapterMu.Unlock()
-	pending.result <- err
+	pending.result <- snapshotResult{err: err}
 }
 
 func (d *Daemon) adapterConnected() bool {
@@ -366,7 +371,7 @@ func (d *Daemon) removeAdapterSession(session *adapterSession) {
 	if pending != nil && pending.session == session {
 		d.pendingSnapshot = nil
 		d.adapterMu.Unlock()
-		pending.result <- errors.New("Spotify adapter disconnected while waiting for snapshot response.")
+		pending.result <- snapshotResult{err: errors.New("Spotify adapter disconnected while waiting for snapshot response.")}
 		return
 	}
 	d.adapterMu.Unlock()
@@ -385,7 +390,7 @@ func (d *Daemon) stopAdapterWork() {
 	}
 	d.adapterMu.Unlock()
 	if pending != nil {
-		pending.result <- errors.New("Spotify synchronization was cancelled because the daemon is shutting down.")
+		pending.result <- snapshotResult{err: errors.New("Spotify synchronization was cancelled because the daemon is shutting down.")}
 	}
 	for _, conn := range connections {
 		_ = conn.Close(websocket.StatusGoingAway, "Daemon shutting down.")
@@ -450,7 +455,7 @@ func (d *Daemon) expireAdapterSession(session *adapterSession) {
 	}
 	d.adapterMu.Unlock()
 	if pending != nil {
-		pending.result <- errors.New("Spotify adapter became unresponsive while waiting for snapshot response.")
+		pending.result <- snapshotResult{err: errors.New("Spotify adapter became unresponsive while waiting for snapshot response.")}
 	}
 	_ = session.conn.Close(websocket.StatusGoingAway, "Adapter session liveness expired.")
 }

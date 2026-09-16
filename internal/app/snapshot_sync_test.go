@@ -146,15 +146,6 @@ func TestSpotifySyncRejectsUnmatchedInvalidAndDuplicateResponses(t *testing.T) {
 				writeSyntheticResponse(t, conn, "wrong-request-id")
 			},
 		},
-		{
-			name: "non synthetic payload",
-			response: func(t *testing.T, conn *websocket.Conn, requestID string) {
-				writeAdapterJSON(t, conn, map[string]any{
-					"version": 1, "type": "snapshot.response", "request_id": requestID,
-					"snapshot": map[string]any{"kind": "synthetic", "marker": "wrong"},
-				})
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := startAdapterDaemon(t)
