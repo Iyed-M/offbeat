@@ -232,6 +232,12 @@ func TestCLISpotifySyncPrintsCandidateSuccess(t *testing.T) {
 	}
 }
 
+func TestCLISpotifySyncWaitBudgetExceedsM3SnapshotTimeout(t *testing.T) {
+	if spotifySyncReadTimeout <= 5*time.Minute {
+		t.Fatalf("Spotify sync read timeout = %s, want more than 5m", spotifySyncReadTimeout)
+	}
+}
+
 func writeCLIAdapterJSON(t *testing.T, conn *websocket.Conn, value any) {
 	t.Helper()
 	data, err := json.Marshal(value)

@@ -95,6 +95,12 @@ func TestSpotifySyncTimesOutWithoutResponse(t *testing.T) {
 	assertSyncFailure(t, syncResponse(t, <-done), "Timed out waiting")
 }
 
+func TestM3SnapshotTimeoutIsFiveMinutes(t *testing.T) {
+	if m3SnapshotTimeout != 5*time.Minute {
+		t.Fatalf("M3 snapshot timeout = %s, want 5m", m3SnapshotTimeout)
+	}
+}
+
 func TestAdapterLivenessExpiryFailsPendingSync(t *testing.T) {
 	d := startAdapterDaemon(t)
 	d.livenessInterval = 5 * time.Millisecond

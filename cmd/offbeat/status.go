@@ -19,7 +19,7 @@ import (
 const (
 	controlConnectTimeout  = 2 * time.Second
 	controlReadTimeout     = 5 * time.Second
-	spotifySyncReadTimeout = 35 * time.Second
+	spotifySyncReadTimeout = 5*time.Minute + 15*time.Second
 )
 
 // runStatus connects to the daemon over its control socket, requests the
