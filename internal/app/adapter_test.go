@@ -162,6 +162,27 @@ func TestAdapterRejectsPostAuthenticationAndOversizedMessages(t *testing.T) {
 	}
 }
 
+func TestAdapterLogsExtensionMessages(t *testing.T) {
+	d := startAdapterDaemon(t)
+	conn := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	writeAdapterJSON(t, conn, map[string]any{
+		"version": 1,
+		"type":    "log",
+		"level":   "warn",
+		"message": "adapter diagnostic",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(d.Cfg.Paths.LogFile)
+		if err == nil && strings.Contains(string(data), "adapter diagnostic") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("daemon did not write adapter diagnostic to its log")
+}
+
 func authenticateAdapter(t *testing.T, endpoint string) *websocket.Conn {
 	t.Helper()
 	conn := dialAdapter(t, endpoint)

@@ -14,7 +14,6 @@
     var WebSocketConstructor = dependencies.WebSocket;
     var setTimer = dependencies.setTimeout;
     var clearTimer = dependencies.clearTimeout;
-    var logger = dependencies.logger || global.console;
     var socket = null;
     var reconnectTimer = null;
     var reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
@@ -23,8 +22,13 @@
     var permanentlyRejected = false;
 
     function log(level, message) {
-      if (logger && typeof logger[level] === "function") {
-        logger[level](message);
+      if (authenticated && socket) {
+        send({
+          version: PROTOCOL_VERSION,
+          type: "log",
+          level: level,
+          message: message
+        });
       }
     }
 
@@ -183,8 +187,7 @@
     createAdapter(global.OffbeatM2Config, {
       WebSocket: global.WebSocket,
       setTimeout: global.setTimeout.bind(global),
-      clearTimeout: global.clearTimeout.bind(global),
-      logger: global.console
+      clearTimeout: global.clearTimeout.bind(global)
     }).start();
   }
 

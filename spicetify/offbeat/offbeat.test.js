@@ -115,6 +115,20 @@ test("closes and retries after malformed or out-of-state daemon messages", funct
   assert.equal(peer.timers[0].delay, 1000);
 });
 
+test("forwards adapter logs to the daemon after authentication", function () {
+  var peer = createPeer();
+  start(peer);
+  peer.sockets[0].open();
+  peer.sockets[0].receive({ version: 1, type: "hello.accepted" });
+  peer.sockets[0].receive({ version: 1, type: "unexpected" });
+  assert.deepEqual(peer.sockets[0].sent[1], {
+    version: 1,
+    type: "log",
+    level: "warn",
+    message: "Offbeat adapter received an invalid daemon message."
+  });
+});
+
 test("closes and retries after an oversized daemon message", function () {
   var peer = createPeer();
   start(peer);

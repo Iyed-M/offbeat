@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -127,7 +128,7 @@ func (d *Daemon) serveAdapter(ctx context.Context, w http.ResponseWriter, r *htt
 			d.writeAdapterError(conn, adapterErrorInvalidMessage)
 			return
 		}
-		if protocolErr := d.acceptSnapshotResponse(session, data); protocolErr != "" {
+		if protocolErr := d.acceptAdapterMessage(session, data); protocolErr != "" {
 			d.removeAdapterSession(session)
 			d.writeAdapterError(conn, protocolErr)
 			return
@@ -278,6 +279,89 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 	d.adapterMu.Unlock()
 	pending.result <- nil
 	return ""
+}
+
+func (d *Daemon) acceptAdapterMessage(session *adapterSession, data []byte) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return adapterErrorInvalidMessage
+	}
+	if versionField, ok := fields["version"]; ok {
+		var version int
+		if err := json.Unmarshal(versionField, &version); err != nil {
+			return adapterErrorInvalidMessage
+		}
+		if version != adapterProtocolVersion {
+			return adapterErrorUnsupportedVersion
+		}
+	}
+	messageType, ok := fields["type"]
+	if !ok {
+		return adapterErrorInvalidMessage
+	}
+	var messageTypeValue string
+	if err := json.Unmarshal(messageType, &messageTypeValue); err != nil {
+		return adapterErrorInvalidMessage
+	}
+	if messageTypeValue == "snapshot.response" {
+		return d.acceptSnapshotResponse(session, data)
+	}
+	if messageTypeValue != "log" {
+		return adapterErrorInvalidMessage
+	}
+
+	level, message, protocolErr := parseAdapterLog(data)
+	if protocolErr != "" {
+		return protocolErr
+	}
+	if d.Logger != nil {
+		d.Logger.Log(context.Background(), level, message, "source", "spicetify")
+	}
+	return ""
+}
+
+func parseAdapterLog(data []byte) (slog.Level, string, string) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	if len(fields) != 4 {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	for key := range fields {
+		if key != "version" && key != "type" && key != "level" && key != "message" {
+			return 0, "", adapterErrorInvalidMessage
+		}
+	}
+	var version int
+	var messageType, levelName, message string
+	if err := json.Unmarshal(fields["version"], &version); err != nil {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	if version != adapterProtocolVersion {
+		return 0, "", adapterErrorUnsupportedVersion
+	}
+	if err := json.Unmarshal(fields["type"], &messageType); err != nil || messageType != "log" {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	if err := json.Unmarshal(fields["level"], &levelName); err != nil {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	if err := json.Unmarshal(fields["message"], &message); err != nil || message == "" {
+		return 0, "", adapterErrorInvalidMessage
+	}
+	switch levelName {
+	case "debug":
+		return slog.LevelDebug, message, ""
+	case "info":
+		return slog.LevelInfo, message, ""
+	case "warn":
+		return slog.LevelWarn, message, ""
+	case "error":
+		return slog.LevelError, message, ""
+	default:
+		return 0, "", adapterErrorInvalidMessage
+	}
 }
 
 type snapshotResponse struct {
