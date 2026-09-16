@@ -241,12 +241,24 @@ func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 		return struct{}{}, nil
 	case <-timer.C:
 		message := "Timed out waiting for Spotify adapter snapshot response."
-		d.completePendingSnapshot(pending, errors.New(message))
-		return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+		if d.invalidateAdapterSession(pending.session, pending, errors.New(message), message) {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+		}
+		err := <-pending.result
+		if err != nil {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
+		}
+		return struct{}{}, nil
 	case <-ctx.Done():
 		message := "Spotify synchronization was cancelled."
-		d.completePendingSnapshot(pending, errors.New(message))
-		return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+		if d.invalidateAdapterSession(pending.session, pending, errors.New(message), message) {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
+		}
+		err := <-pending.result
+		if err != nil {
+			return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
+		}
+		return struct{}{}, nil
 	}
 }
 
@@ -655,10 +667,21 @@ func (d *Daemon) maintainAdapterLiveness(ctx context.Context, session *adapterSe
 }
 
 func (d *Daemon) expireAdapterSession(session *adapterSession) {
+	d.invalidateAdapterSession(session, nil, errors.New("Spotify adapter became unresponsive while waiting for snapshot response."), "Adapter session liveness expired.")
+}
+
+// invalidateAdapterSession atomically removes the active session and, when
+// requested, only the exact pending snapshot it owns. This lets timeout and
+// cancellation win or lose cleanly against a simultaneous response.
+func (d *Daemon) invalidateAdapterSession(session *adapterSession, expected *pendingSnapshot, pendingErr error, closeReason string) bool {
 	d.adapterMu.Lock()
 	if d.adapterSession != session {
 		d.adapterMu.Unlock()
-		return
+		return false
+	}
+	if expected != nil && d.pendingSnapshot != expected {
+		d.adapterMu.Unlock()
+		return false
 	}
 	d.adapterSession = nil
 	pending := d.pendingSnapshot
@@ -669,7 +692,8 @@ func (d *Daemon) expireAdapterSession(session *adapterSession) {
 	}
 	d.adapterMu.Unlock()
 	if pending != nil {
-		pending.result <- errors.New("Spotify adapter became unresponsive while waiting for snapshot response.")
+		pending.result <- pendingErr
 	}
-	_ = session.conn.Close(websocket.StatusGoingAway, "Adapter session liveness expired.")
+	_ = session.conn.Close(websocket.StatusGoingAway, closeReason)
+	return true
 }

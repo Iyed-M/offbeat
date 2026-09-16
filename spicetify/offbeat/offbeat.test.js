@@ -132,6 +132,15 @@ test("rejects malformed rootlists, items, and page counters", async function () 
   }), /response could not be interpreted/);
 });
 
+test("rejects pages whose reported offset does not match the requested offset", async function () {
+  var repeatedPage = { offset: 0, items: Array.from({ length: 100 }, function (_, index) { return supportedTrack("spotify:track:" + index, "Track " + index); }), totalLength: 200 };
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: { getTracks: async function () { return repeatedPage; } }
+  }), /inconsistent pagination/);
+});
+
 test("sends one bounded collection error instead of a partial candidate", async function () {
   var peer = createPeer();
   start(peer, {
@@ -150,6 +159,37 @@ test("sends one bounded collection error instead of a partial candidate", async 
     request_id: "failed-request",
     error: { operation: "playlist", offset: 0, message: "request failed" }
   });
+});
+
+test("discards a completed collection when its requesting session disconnects", async function () {
+  var peer = createPeer();
+  var resolveRootlist;
+  var rootlistCalls = 0;
+  start(peer, {
+    RootlistAPI: { getContents: function () {
+      rootlistCalls += 1;
+      if (rootlistCalls > 1) return Promise.resolve({ items: [] });
+      return new Promise(function (resolve) { resolveRootlist = resolve; });
+    } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: emptyPlatform().LibraryAPI
+  });
+  var sessionA = peer.sockets[0];
+  sessionA.open();
+  sessionA.receive({ version: 1, type: "hello.accepted" });
+  sessionA.receive({ version: 1, type: "snapshot.request", request_id: "request-a" });
+  sessionA.disconnect();
+  peer.runNextTimer();
+  var sessionB = peer.sockets[1];
+  sessionB.open();
+  sessionB.receive({ version: 1, type: "hello.accepted" });
+  resolveRootlist({ items: [] });
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.equal(sessionA.sent.some(function (message) { return message.type === "snapshot.response"; }), false);
+  assert.deepEqual(sessionB.sent, [{ version: 1, type: "hello", credential: "development-credential" }]);
+  sessionB.receive({ version: 1, type: "snapshot.request", request_id: "request-b" });
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.equal(sessionB.sent[2].request_id, "request-b");
 });
 
 test("reconnects after transport loss with capped backoff and resets after authentication", function () {

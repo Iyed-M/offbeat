@@ -26,6 +26,11 @@
     if (!object(response) || !Array.isArray(response.items) || !Number.isSafeInteger(response.totalLength) || response.totalLength < 0) {
       throw collectionError(operation, offset);
     }
+    // Some supported Platform builds report their response offset. When they
+    // do, it must match the page requested; other builds expose no position.
+    if (Object.prototype.hasOwnProperty.call(response, "offset") && (!Number.isSafeInteger(response.offset) || response.offset !== offset)) {
+      throw collectionError(operation, offset, "inconsistent pagination");
+    }
     return response;
   }
 
@@ -145,9 +150,9 @@
     function send(message) { socket.send(JSON.stringify(message)); }
     function rejectPermanently(code) { permanentlyRejected = true; log("error", "Offbeat adapter rejected by daemon: " + code + ". Reconfigure or reload the extension before retrying."); if (socket) socket.close(); }
     function protocolViolation(message) { log("warn", message); if (socket) socket.close(); }
-    function respondToSnapshot(requestID) {
+    function respondToSnapshot(requestID, session) {
       collectSnapshot(platform).then(function (snapshot) {
-        if (authenticated && socket) {
+        if (authenticated && socket === session) {
           var entries = 0;
           var unsupported = 0;
           for (var playlistIndex = 0; playlistIndex < snapshot.playlists.length; playlistIndex += 1) {
@@ -156,13 +161,14 @@
           }
           entries += snapshot.liked_songs.entries.length;
           for (var likedIndex = 0; likedIndex < snapshot.liked_songs.entries.length; likedIndex += 1) if (snapshot.liked_songs.entries[likedIndex].kind === "unsupported") unsupported += 1;
-          log("info", "Collected candidate snapshot: playlists=" + snapshot.playlists.length + " entries=" + entries + " unsupported_entries=" + unsupported + " liked_songs=" + snapshot.liked_songs.entries.length + ".");
-          send({ version: PROTOCOL_VERSION, type: "snapshot.response", request_id: requestID, snapshot: snapshot });
+          var candidateBytes = new global.TextEncoder().encode(JSON.stringify(snapshot)).length;
+          session.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "log", level: "info", message: "Collected candidate snapshot: playlists=" + snapshot.playlists.length + " entries=" + entries + " unsupported_entries=" + unsupported + " liked_songs=" + snapshot.liked_songs.entries.length + " candidate_bytes=" + candidateBytes + "." }));
+          session.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "snapshot.response", request_id: requestID, snapshot: snapshot }));
         }
       }, function (error) {
         var failure = { operation: error && error.operation ? error.operation : "collection", message: error && requiredString(error.message) ? error.message : "collection failed" };
         if (error && Number.isSafeInteger(error.offset) && error.offset >= 0) failure.offset = error.offset;
-        if (authenticated && socket) send({ version: PROTOCOL_VERSION, type: "snapshot.response", request_id: requestID, error: failure });
+        if (authenticated && socket === session) session.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "snapshot.response", request_id: requestID, error: failure }));
       });
     }
     function handleMessage(event) {
@@ -176,7 +182,7 @@
         return;
       }
       if (message.type === "hello.accepted") { if (authenticated || Object.keys(message).length !== 2) return protocolViolation("Offbeat adapter received an invalid authentication acceptance."); authenticated = true; reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS; return; }
-      if (message.type === "snapshot.request" && authenticated && typeof message.request_id === "string" && message.request_id !== "" && Object.keys(message).length === 3) { respondToSnapshot(message.request_id); return; }
+      if (message.type === "snapshot.request" && authenticated && typeof message.request_id === "string" && message.request_id !== "" && Object.keys(message).length === 3) { respondToSnapshot(message.request_id, socket); return; }
       protocolViolation("Offbeat adapter received an invalid daemon message.");
     }
     function connect() {

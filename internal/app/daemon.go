@@ -57,6 +57,8 @@ type Options struct {
 
 var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
 
+const m3SnapshotTimeout = 5 * time.Minute
+
 func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 	loader := config.NewLoader(opts.HomeDir, opts.ConfigPath)
 	cfg, err := loader.Load()
@@ -78,7 +80,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		adapterCredential: opts.AdapterCredential,
 		startedAt:         time.Now().UTC(),
 		version:           opts.Version,
-		snapshotTimeout:   30 * time.Second,
+		snapshotTimeout:   m3SnapshotTimeout,
 		livenessWindow:    30 * time.Second,
 		livenessInterval:  10 * time.Second,
 	}

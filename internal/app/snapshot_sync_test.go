@@ -88,11 +88,53 @@ func TestSpotifySyncFailsPromptlyWhenAdapterDisconnects(t *testing.T) {
 func TestSpotifySyncTimesOutWithoutResponse(t *testing.T) {
 	d := startAdapterDaemon(t)
 	d.snapshotTimeout = 30 * time.Millisecond
-	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	endpoint := AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port)
+	adapter := authenticateAdapter(t, endpoint)
 
 	done := sendSync(t, d)
 	_ = readAdapterMessage(t, adapter)
 	assertSyncFailure(t, syncResponse(t, <-done), "Timed out waiting")
+	assertAdapterClosed(t, adapter)
+	waitForAdapterConnected(t, d, false)
+
+	replacement := authenticateAdapter(t, endpoint)
+	done = sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, replacement))
+	writeCandidateResponse(t, replacement, requestID)
+	assertSyncSuccess(t, syncResponse(t, <-done))
+}
+
+func TestSpotifySyncCancellationInvalidatesOwningAdapterSession(t *testing.T) {
+	d := startAdapterDaemon(t)
+	endpoint := AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port)
+	adapter := authenticateAdapter(t, endpoint)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.handleSpotifySync(ctx)
+		done <- err
+	}()
+	_ = readAdapterMessage(t, adapter)
+	cancel()
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("sync error = %v, want cancellation", err)
+	}
+	assertAdapterClosed(t, adapter)
+	waitForAdapterConnected(t, d, false)
+
+	replacement := authenticateAdapter(t, endpoint)
+	doneSync := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, replacement))
+	writeCandidateResponse(t, replacement, requestID)
+	assertSyncSuccess(t, syncResponse(t, <-doneSync))
+}
+
+func TestM3SnapshotTimeoutIsFiveMinutes(t *testing.T) {
+	if m3SnapshotTimeout != 5*time.Minute {
+		t.Fatalf("M3 snapshot timeout = %s, want 5m", m3SnapshotTimeout)
+	}
 }
 
 func TestAdapterLivenessExpiryFailsPendingSync(t *testing.T) {
@@ -303,5 +345,14 @@ func assertSyncFailure(t *testing.T, response ipc.Response, message string) {
 	t.Helper()
 	if response.Error == nil || response.Error.Code != ipc.CodeFailedPrecondition || !strings.Contains(response.Error.Message, message) {
 		t.Fatalf("sync response = %+v, want failed_precondition containing %q", response, message)
+	}
+}
+
+func assertAdapterClosed(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); websocket.CloseStatus(err) != websocket.StatusGoingAway {
+		t.Fatalf("adapter close status = %v, want %v", websocket.CloseStatus(err), websocket.StatusGoingAway)
 	}
 }

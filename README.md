@@ -7,17 +7,20 @@ library, then synchronizes the playable subset to a paired Android device on
 the same network. Spotify stays the source of truth. `offbeat` owns only the
 local representation.
 
-This repository is at **Milestone 2**. The daemon, CLI, and Spicetify extension
-can prove their authenticated local transport with a synthetic snapshot only.
-They do not yet collect, persist, or reconcile real Spotify state.
+This repository has implemented Milestone 3 candidate collection and awaits the
+manual real-client acceptance run in GitHub issue #34. The daemon, CLI, and
+Spicetify extension collect a normalized candidate containing real playlists
+and Liked Songs through Spotify Desktop's authenticated Platform facade. They
+do not persist or reconcile Spotify state; Milestone 4 begins after M3 is
+accepted.
 
 ## Components
 
 | Component | Path             | Status |
 |-----------|------------------|--------|
-| Daemon    | `cmd/offbeatd`   | lifecycle, Control protocol, and local adapter endpoint |
-| CLI       | `cmd/offbeat`    | `status`, `config`, and synthetic `spotify sync` |
-| Extension | `spicetify/offbeat` | M2 synthetic WebSocket adapter |
+| Daemon    | `cmd/offbeatd`   | lifecycle, control protocol, adapter endpoint, and normalized candidate validation |
+| CLI       | `cmd/offbeat`    | `status`, `config`, and candidate `spotify sync` requests |
+| Extension | `spicetify/offbeat` | M3 real playlist and Liked Songs collection adapter |
 | Domain    | `internal/domain`| typed IDs and value types |
 | Config    | `internal/config`| TOML loader with defaults |
 | DB        | `internal/db`    | SQLite + migration runner |
@@ -67,7 +70,7 @@ offbeatd --config /path/to/config.toml --home /tmp/sandbox
 offbeat  --config /path/to/config.toml status
 ```
 
-## M2 development credential
+## Development credential
 
 Until `offbeat setup` is implemented, the daemon requires a development-only
 adapter credential from `OFFBEAT_ADAPTER_CREDENTIAL`. This value is not TOML
@@ -83,7 +86,7 @@ The adapter listener binds to `ws://127.0.0.1:16352/v1/adapter` by default.
 Only literal loopback addresses and nonzero ports are accepted. The adapter
 authenticates as its first WebSocket message and supports one active session.
 
-## M2 Spicetify smoke test
+## M3 Spicetify validation
 
 The manual development procedure, including the configured extension artifact
 and complete connect, disconnect, and reconnect smoke sequence, is in
@@ -112,4 +115,6 @@ offbeat/
 
 ## Roadmap
 
-This repository is implementing the milestone plan in `docs/IMPLEMENTATION_PLAN.md` and currently working on Milestone 2.
+This repository is implementing the milestone plan in `docs/IMPLEMENTATION_PLAN.md`.
+Milestone 3 implementation is pending the manual real-client acceptance gate in
+issue #34; Milestone 4 is next after that gate passes.

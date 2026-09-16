@@ -45,25 +45,74 @@ Spicetify configuration, and `offbeat setup`.
    location, change enabled extensions, or invoke `spicetify`.
 
 4. Start an M3-compatible `offbeatd` configured with the same loopback endpoint
-   and development credential, then start Spotify Desktop. Run:
+   and development credential, then start Spotify Desktop. Confirm the adapter
+   is connected, run one real sync, and retain the daemon log line produced by
+   the extension:
 
-   ```sh
-   offbeat status
-   offbeat spotify sync
-   ```
+    ```sh
+    offbeat status
+    offbeat spotify sync
+    ```
 
-   The expected output is `Spotify adapter: connected` followed by `Spotify
-   candidate snapshot received.` The daemon log records playlist, entry,
-   unsupported-entry, and Liked Songs counts; compare them with the visible account
-   under M3 semantics. Stop Spotify and verify status becomes
-   `Spotify adapter: disconnected`; restart Spotify, wait for reconnection, and
-   run the sync command again.
+    The expected output is `Spotify adapter: connected` followed by `Spotify
+    candidate snapshot received.` Record the log's `playlists`, `entries`,
+    `unsupported_entries`, `liked_songs`, and `candidate_bytes` values. Compare
+    the first four counts with the visible account under M3 semantics, and
+    record `candidate_bytes` for the 16 MiB adapter-message-limit check. The
+    logged size is the serialized candidate snapshot only; it deliberately
+    excludes the adapter credential and Spotify error objects.
 
-Repeat `offbeat spotify sync` without restarting Spotify. To validate the
-required-page rejection path in a development session, temporarily make one
-`PlaylistAPI.getContents` or `LibraryAPI.getTracks` call reject in browser
-DevTools. The command must report `snapshot rejected`, no candidate response is
-sent, and the daemon has no snapshot persistence in this milestone.
+5. Without restarting Spotify, repeat `offbeat spotify sync`. It must again
+   report `Spotify candidate snapshot received.` and produce a complete set of
+   counts.
+
+6. In Spotify DevTools, deliberately force one required Liked Songs page to
+   fail, then run one more sync. This example fails only the next offset-zero
+   request and leaves later requests untouched:
+
+    ```js
+    const originalGetTracks = Spicetify.Platform.LibraryAPI.getTracks;
+    let failOnce = true;
+    Spicetify.Platform.LibraryAPI.getTracks = async function (request) {
+      if (failOnce && request.offset === 0) {
+        failOnce = false;
+        throw new Error("forced M3 page failure");
+      }
+      return originalGetTracks.call(this, request);
+    };
+    ```
+
+    The command must report a snapshot rejection during `liked_songs` at offset
+    zero. The extension may send the bounded error response, but it must not
+    send a candidate response. Restore the original method after the check:
+
+    ```js
+    Spicetify.Platform.LibraryAPI.getTracks = originalGetTracks;
+    ```
+
+7. Confirm no partial candidate was accepted: the failed command has no
+   candidate-success output, the daemon has no snapshot persistence, and no
+   SQLite snapshot/reconciliation state exists in M3. This procedure is the
+   human validation gate for issue #34; do not mark it complete based on the
+   automated tests alone.
+
+## Pagination and size limits
+
+The adapter requests every page with explicit `offset` and `limit`, verifies a
+non-negative stable `totalLength`, rejects pages that overrun the remaining
+total, rejects an empty page before completion, and requires forward progress.
+When a Platform response exposes an `offset`, the adapter also requires it to
+match the requested offset, which rejects an API that repeats an earlier page.
+Some supported Platform builds expose only `items` and `totalLength`; without a
+returned page position, two distinct pages with identical entries cannot be
+reliably distinguished from legitimate duplicate Spotify entries. The adapter
+does not deduplicate entries to guess at that condition.
+
+The adapter and daemon both retain the 16 MiB message limit. Do not change that
+limit without real-client evidence. During the acceptance run, compare the
+recorded `candidate_bytes` with 16 MiB (16,777,216 bytes); if it approaches the
+limit, retain the log evidence for a later design decision rather than changing
+the protocol ad hoc.
 
 The configured artifact is derived local state. Deleting it does not rotate the
 daemon credential or alter Offbeat identity.
