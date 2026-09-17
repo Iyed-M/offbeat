@@ -1,460 +1,244 @@
 # Offbeat v1 — Product Requirements Document
 
-> **Workflow status:** This document is the product requirements baseline, not an active task queue. Use `/to-spec` to publish a scoped change as a GitHub issue and `/to-tickets` to split approved work into agent-ready issues. GitHub issue state and discussion are authoritative for active delivery; update this baseline when an accepted change alters v1 product requirements.
+> **Workflow status:** This document is the v1 product baseline, not an active task queue. Use `/to-spec` to publish a scoped milestone/change as a GitHub issue and `/to-tickets` to split approved work into agent-ready issues. GitHub issue state and discussion are authoritative for active delivery.
+>
+> **Scope reset (2026-09-17):** ADR-0010 replaces the original infrastructure-heavy v1 roadmap with a current-state-first product. Milestones 1–3 remain valid and complete. Deferred features should not be reintroduced without a concrete requirement and a scoped decision.
 
-## 1. Product Summary
+## 1. Product summary
 
-Offbeat is a personal, local-first system that mirrors a user's Spotify playlists and Liked Songs into an offline music library available on:
+Offbeat is a personal, local-first system that mirrors a user's Spotify playlists and Liked Songs into ordinary local audio files and `.m3u8` playlists on:
 
-* a Linux desktop;
-* an Android phone on the same local network.
+- one Linux desktop;
+- one Android phone on the same local network.
 
-Spotify remains the source of truth for playlist membership, playlist ordering, playlist names, and Liked Songs.
+Spotify remains the source of truth for playlist identity, names, membership, ordering, duplicate occurrences, and Liked Songs. Offbeat owns only its local representation and managed files.
 
-Offbeat consists of four primary components:
+Offbeat does not implement music playback. Existing desktop and Android music players consume the files it produces.
 
-1. a Spicetify extension running inside Spotify Desktop;
-2. an always-running Go daemon on Linux;
-3. a Linux CLI that controls and inspects the daemon;
-4. a minimal native Android synchronization application.
+## 2. v1 product goal
 
-Offbeat does not implement music playback. On desktop and Android it produces ordinary audio files plus standard `.m3u8` playlists that can be consumed by existing music players.
+The shortest successful v1 flow is:
 
----
+```text
+Spotify Desktop
+  -> Spicetify collects complete metadata
+  -> offbeatd atomically stores current desired state
+  -> missing supported tracks are identified
+  -> authorized media sources are acquired into the managed library
+  -> desktop M3U8 playlists are generated
+  -> one Android device manually syncs the current playable library
+  -> ordinary local players work offline
+```
 
-# 2. Problem Statement
+The product is successful when this flow is reliable. v1 does not need to pre-solve historical replay, generalized matching, broad multi-device sync, or speculative future acquisition backends.
 
-The user has Spotify Desktop on Linux without Spotify Premium and wants their Spotify playlists and Liked Songs available offline on both their PC and Android phone.
-
-The system must:
-
-* read Spotify playlist and Liked Songs metadata from the running Spotify Desktop client through Spicetify;
-* maintain a local representation of that Spotify state;
-* reconcile that desired state against locally available audio;
-* acquire authorized media through a pluggable acquisition pipeline whose v1 downloader backend is `yt-dlp`;
-* maintain a managed local music library;
-* generate offline playlists;
-* synchronize the playable library to Android over the local network;
-* preserve usability even when Spotify, the Internet, or the desktop is later unavailable.
-
-Spotify itself is not used for offline audio storage.
-
----
-
-# 3. Product Goals
-
-## 3.1 Primary goals
+## 3. Primary requirements
 
 Offbeat v1 must:
 
-1. mirror all normal Spotify music playlists;
-2. mirror all Liked Songs;
-3. preserve Spotify playlist ordering;
-4. keep Spotify as the source of truth;
-5. maintain one managed local audio library;
-6. identify missing Spotify tracks;
-7. automatically process missing tracks through the acquisition pipeline after first-time approval;
-8. expose uncertain matches for human review;
-9. generate `.m3u8` playlists for all playable tracks;
-10. synchronize the current playable Spotify-referenced library to Android;
-11. make synchronized Android audio usable by ordinary local music players;
-12. remain usable offline after synchronization.
+1. collect every supported Spotify playlist exposed by the established Spicetify collection path;
+2. collect Liked Songs;
+3. preserve playlist and Liked Songs ordering;
+4. preserve duplicate playlist occurrences;
+5. preserve structurally readable unsupported entries as ordered placeholders;
+6. reject incomplete Spotify candidates without changing committed desired state;
+7. persist the current Spotify desired state atomically in SQLite;
+8. expose a simple monotonically increasing state revision when desired state changes;
+9. maintain one managed local file per supported Spotify track when available;
+10. identify supported desired tracks whose managed file is missing;
+11. acquire media only from sources the user is authorized to download;
+12. generate ordinary `.m3u8` playlists containing the playable subset in Spotify order;
+13. manually synchronize the current playable library to one Android device over the local network;
+14. leave already-synchronized desktop and Android files usable when Spotify, the Internet, or the desktop is later unavailable.
 
----
+## 4. Explicitly deferred from v1
 
-# 4. Non-Goals
+The following were present or implied in the original roadmap but are not required for the lean v1:
 
-The following are explicitly outside v1:
+- historical Spotify snapshot retention;
+- replayable revision history and a general `revision_changes` event log;
+- `offbeat history` as a required command;
+- cross-track physical asset deduplication;
+- many-to-many Spotify-track/asset mappings;
+- reference-counted automatic file deletion;
+- fuzzy metadata matching;
+- high/medium/low match confidence;
+- persistent human match review queues and `offbeat review`;
+- acoustic fingerprinting;
+- scanning arbitrary external music libraries;
+- a generalized multi-resolver acquisition framework;
+- elaborate acquisition-attempt history and retry state machines;
+- automatic destructive cleanup of the managed library;
+- deep integrity scanning and `offbeat verify` as a required command;
+- mDNS/DNS-SD Android discovery;
+- broad multi-device management;
+- arbitrary old-revision-to-new-revision replay semantics;
+- resumable Android file transfers;
+- Android background automatic sync;
+- complex storage preflight and transactional sync protocols;
+- mandatory per-file SHA-256 verification on Android;
+- one-command automation of every setup/install step;
+- Windows, macOS, iOS, cloud sync, Internet-based device sync, or a built-in music player.
 
-* Spotify Premium functionality;
-* extracting or decrypting Spotify's cached audio;
-* a music player;
-* desktop GUI;
-* desktop web UI;
-* Windows support;
-* macOS support;
-* iOS support;
-* editing Spotify playlists from Offbeat;
-* editing Spotify Liked Songs from Offbeat;
-* bidirectional synchronization with Spotify;
-* Android-to-PC metadata edits;
-* Spotify integration on Android;
-* podcast support;
-* Spotify playlist-folder preservation;
-* acoustic fingerprinting;
-* per-device audio transcoding;
-* dedicated backup tooling;
-* cloud synchronization;
-* Internet-based device synchronization;
-* automatic installation of Spotify, Spicetify, `yt-dlp`, or FFmpeg.
+Deferred features may be added after v1 when real usage demonstrates their value.
 
----
+## 5. Safety and acquisition boundary
 
-# 5. Safety and Acquisition Boundary
+The acquisition subsystem must operate only on sources the user is authorized to download.
 
-The acquisition subsystem must only operate on sources the user is authorized to download.
+`yt-dlp` is a media retrieval backend. It is not a Spotify catalog downloader.
 
-`yt-dlp` is a media retrieval backend, not Offbeat's Spotify catalog downloader.
+Offbeat v1 must not implement an automatic workflow whose purpose is to search arbitrary third-party services for copyrighted Spotify tracks solely to bypass Spotify offline/Premium restrictions.
 
-The product architecture must separate:
+The v1 acquisition design should model the concrete authorized source workflow that is actually used. A small boundary around `yt-dlp` is appropriate so command execution details do not leak through the daemon, but v1 does not require a speculative resolver/plugin framework.
 
-```text
-Spotify metadata
-      ↓
-logical desired track
-      ↓
-SourceResolver
-      ↓
-authorized source candidate
-      ↓
-Downloader
-      ↓
-yt-dlp backend
-```
+## 6. Components and ownership
 
-The v1 implementation must not hard-code an automatic workflow whose purpose is to search arbitrary copyrighted Spotify tracks on third-party services solely to bypass Spotify's offline/Premium restrictions.
-
-The resolver architecture must remain pluggable.
-
----
-
-# 6. High-Level Architecture
-
-```text
-                           Spotify Desktop
-                                  │
-                                  │
-                         Spicetify Extension
-                                  │
-                      localhost WebSocket
-                                  │
-                                  ▼
-                    ┌────────────────────────┐
-                    │       offbeatd        │
-                    │                        │
-                    │ Spotify reconciliation │
-                    │ SQLite                 │
-                    │ matching               │
-                    │ review queue           │
-                    │ acquisition queue      │
-                    │ yt-dlp backend         │
-                    │ FFmpeg normalization   │
-                    │ metadata tagging       │
-                    │ M3U8 generation        │
-                    │ revision management    │
-                    │ device pairing         │
-                    │ LAN synchronization    │
-                    └───────────┬────────────┘
-                                │
-                    ┌───────────┴────────────┐
-                    │                        │
-                    ▼                        ▼
-           ~/Music/Offbeat/        HTTPS LAN sync API
-                                             │
-                                             ▼
-                                    Android companion
-                                             │
-                                             ▼
-                                     Music/Offbeat/
-                                             │
-                                             ▼
-                                    existing music player
-```
-
----
-
-# 7. Component Responsibilities
-
-## 7.1 Spicetify extension
+### 6.1 Spicetify extension
 
 The extension is the only component that communicates with Spotify.
 
-Responsibilities:
+It must:
 
-* run inside Spotify Desktop;
-* connect outbound to `offbeatd` using localhost WebSocket;
-* identify itself using a locally generated adapter credential;
-* collect the user's complete Spotify state;
-* collect all normal music playlists;
-* collect all Liked Songs;
-* preserve playlist ordering;
-* preserve duplicate playlist entries;
-* send playlist names and Spotify playlist IDs;
-* send track metadata;
-* send Spotify track identity;
-* send duration and artwork references when available;
-* answer daemon-triggered snapshot requests;
-* perform an automatic snapshot on extension startup.
+- run inside Spotify Desktop;
+- connect outbound to `offbeatd` through the established loopback Adapter endpoint;
+- authenticate with the Adapter credential;
+- collect a complete normalized candidate snapshot on a daemon-issued Snapshot request;
+- collect playlists and Liked Songs using the M3 adapter contract;
+- preserve ordering, duplicate occurrences, and unsupported placeholders;
+- send no raw Spotify Desktop response shapes to the daemon.
 
 It must not:
 
-* download audio;
-* manage SQLite;
-* modify Spotify;
-* perform filesystem management;
-* communicate with Android.
+- access SQLite;
+- manage local files;
+- acquire audio;
+- communicate with Android;
+- expose Spotify credentials to `offbeatd`.
 
----
+### 6.2 Daemon owner
 
-# 8. Spotify Snapshot Semantics
+`offbeatd` remains the sole owner of:
 
-## 8.1 Full snapshot atomicity
+- SQLite;
+- committed Spotify desired state;
+- managed-library mutation;
+- acquisition work;
+- playlist generation;
+- Android sync serving/state owned by Offbeat.
 
-Every Spotify synchronization produces a candidate snapshot.
+The daemon starts independently of Spotify. Spotify being stopped must not make the existing local library unusable.
 
-A candidate snapshot is valid only if Offbeat successfully obtains:
+### 6.3 CLI
 
-* the complete playlist list;
-* every page of Liked Songs;
-* every page of every supported playlist;
-* expected counts where Spotify exposes them.
+`offbeat` communicates with the daemon only through the existing local Control protocol.
 
-If any required request fails:
+The CLI must not:
 
-```text
-candidate snapshot
-       ↓
-   discarded
-```
+- open SQLite directly;
+- talk to Spotify directly;
+- mutate managed files directly.
 
-The previous committed Spotify state remains authoritative.
-
-No partial update may modify the desired local library.
-
----
-
-## 8.2 Snapshot contents
-
-A logical snapshot contains at minimum:
-
-```text
-snapshot_id
-spotify_user_id
-captured_at
-
-liked_songs:
-    total_count
-    ordered_entries[]
-
-playlists[]:
-    spotify_playlist_id
-    name
-    total_track_count
-    ordered_entries[]
-```
-
-Each supported track entry should include, where available:
-
-```text
-spotify_track_id / URI
-title
-artists
-album
-duration
-track number
-disc number
-artwork reference
-entry position
-```
-
----
-
-## 8.3 Supported Spotify entries
-
-v1 supports normal Spotify catalog music tracks.
-
-Unsupported entries, including unsupported media types, remain represented logically as placeholders with a reason such as:
-
-```text
-unsupported_type
-```
-
-They must not break snapshot import.
-
----
-
-## 8.4 Eventual consistency
-
-Spotify does not provide Offbeat with a cross-library transactional snapshot.
-
-Offbeat therefore accepts that Spotify may change while a snapshot is being collected.
-
-A successfully fetched snapshot is treated as a valid observation.
-
-Later snapshots converge Offbeat toward newer Spotify state.
-
----
-
-# 9. Spotify Synchronization Triggers
-
-v1 supports:
-
-### Automatic startup sync
-
-```text
-Spotify starts
-→ Spicetify extension loads
-→ extension connects to daemon
-→ complete snapshot collected
-→ daemon commits snapshot
-```
-
-### Manual CLI sync
-
-```bash
-offbeat spotify sync
-```
-
-The CLI:
-
-1. asks the daemon to request a snapshot from the connected extension;
-2. waits for completion;
-3. reports success/failure;
-4. prints the resulting diff.
-
-If Spotify/Spicetify is unavailable:
-
-```text
-Spotify adapter is not connected.
-```
-
-The existing local library remains fully usable.
-
----
-
-# 10. Daemon
-
-## 10.1 Lifecycle
-
-The daemon executable is:
-
-```text
-offbeatd
-```
-
-It runs continuously as a Linux user service:
-
-```text
-systemd --user
-```
-
-It starts independently of Spotify.
-
-Spotify being stopped must not stop Offbeat.
-
----
-
-## 10.2 Daemon ownership
-
-`offbeatd` exclusively owns:
-
-* SQLite;
-* managed-library mutation;
-* acquisition work;
-* playlist generation;
-* revision creation;
-* Android sync state;
-* pairing state.
-
-No other Offbeat component may directly mutate the database.
-
----
-
-# 11. CLI
-
-The executable is:
-
-```text
-offbeat
-```
-
-The CLI never directly:
-
-* opens SQLite;
-* talks to Spotify;
-* edits managed files.
-
-It communicates with the daemon through local IPC.
-
-Preferred v1 IPC:
-
-```text
-Unix domain socket
-```
-
----
-
-# 12. Required CLI Commands
-
-At minimum:
+Required v1 commands are limited to commands that support the actual product flow. At minimum, by the end of v1 the CLI needs equivalents of:
 
 ```bash
 offbeat status
-offbeat spotify sync
-offbeat review
-offbeat missing
-offbeat retry
-offbeat pair
-offbeat devices
-offbeat history
-offbeat verify
 offbeat config
-offbeat setup
+offbeat spotify sync
+offbeat missing
+offbeat acquire ...
 ```
 
-An explicit initial-acquisition approval mechanism must also exist, for example:
+Additional setup or Android diagnostic commands may be added when their milestone needs them. `history`, `review`, `verify`, and broad `devices` management are not baseline v1 requirements.
 
-```bash
-offbeat acquire --approve-initial
-```
+### 6.4 Android app
 
-Exact command naming may vary if the semantics remain equivalent.
+The Android app is a minimal synchronization client, not a Spotify client or music player.
 
----
+For v1 it targets one personal phone. It may require manual desktop address/configuration. It synchronizes Offbeat-owned files into an Android-managed Offbeat directory that ordinary music players can read.
 
-# 13. SQLite
+## 7. Spotify candidate semantics
 
-v1 uses one SQLite database.
+The M3 candidate collection contract remains authoritative.
 
-Default location:
+A candidate is acceptable only when every required playlist and Liked Songs page succeeds and the normalized candidate validates completely. A required failure rejects the candidate.
+
+Candidate rejection must never partially modify committed Spotify desired state.
+
+Unsupported entries remain represented at their source positions. They are not silently dropped and are not considered missing supported tracks.
+
+Spotify folders are discovery-only and are not persisted as desired playlist hierarchy in v1.
+
+## 8. Current Spotify desired state
+
+### 8.1 Persistence model
+
+M4 persists the current desired Spotify state, not a historical event stream.
+
+The database must be able to represent at least:
+
+- supported Spotify track metadata used by downstream features;
+- playlists identified by stable Spotify URI/identity;
+- mutable playlist names;
+- ordered playlist entries including duplicate occurrences;
+- ordered Liked Songs entries;
+- unsupported ordered placeholders where supplied by M3;
+- current state revision and commit timestamp.
+
+The exact normalized M3 identity already supplied over the Adapter protocol should remain the persistence boundary. The daemon must not start decoding Spotify-private response structures.
+
+### 8.2 Atomic commit
+
+Applying a valid candidate occurs in one SQLite transaction.
+
+Conceptually:
 
 ```text
-~/.local/share/offbeat/offbeat.db
+validated candidate
+  -> compare with current desired state
+  -> BEGIN
+  -> write complete new/current state
+  -> update state revision when state changed
+  -> COMMIT
 ```
 
-Only the daemon accesses it.
+Any database failure rolls back the whole candidate and leaves the previous committed desired state authoritative.
 
-Schema changes must use versioned migrations.
+### 8.3 State revision
 
-SQLite should model at least:
+Offbeat maintains a monotonically increasing integer state revision.
 
-* Spotify snapshots/revisions;
-* Spotify tracks;
-* playlists;
-* ordered playlist entries;
-* Liked Songs;
-* local assets;
-* Spotify-track → asset mappings;
-* acquisition work;
-* acquisition attempts;
-* source mappings;
-* review decisions;
-* Android devices;
-* device credentials;
-* sync revisions;
-* lightweight revision history.
+- Increment it only when the committed desired Spotify state changes.
+- A successful no-op observation does not need to create a new revision.
+- The revision is a current-state version for change detection; it is not a promise that historical revisions can be replayed.
 
----
+### 8.4 Sync result
 
-# 14. Managed Desktop Library
+`offbeat spotify sync` should report a concise useful summary after commit, such as counts of changed playlists/tracks/Liked entries. The exact wording belongs to the M4 spec.
 
-Default media root:
+Detailed historical diff storage is not required.
 
-```text
-~/Music/Offbeat/
-```
+## 9. SQLite
 
-Layout:
+v1 uses one SQLite database at the configured data path. Only the Daemon owner accesses it.
+
+Schema changes use versioned migrations.
+
+The schema should be introduced only as features need it. v1 does not need tables merely because a future architecture might use them.
+
+By the end of the relevant milestones, SQLite needs to model:
+
+- current Spotify desired state;
+- state revision metadata;
+- current managed-track availability/mapping;
+- minimal restart-safe acquisition work;
+- minimal Android sync/authentication state if the chosen M8 design requires persistence.
+
+Historical snapshots, review decisions, generalized source-resolution graphs, and multi-device history are not required unless later specs deliberately add them.
+
+## 10. Managed desktop library
+
+Default managed root:
 
 ```text
 ~/Music/Offbeat/
@@ -462,978 +246,172 @@ Layout:
 └── playlists/
 ```
 
-The root must be configurable.
+The root is configurable and owned by Offbeat. External applications may read/play managed files but should treat them as read-only.
 
-Offbeat owns the directory structure.
+### 10.1 Track/file model
 
-External applications may read/play the files but must treat Offbeat-managed content as read-only.
+For lean v1, one supported Spotify track has zero or one managed local audio file.
 
----
+Offbeat does not initially attempt to prove that two Spotify track identities are the same recording and share one physical file.
 
-# 15. Track and Asset Model
+This deliberately favors a simple and trustworthy model over storage optimization. Cross-track deduplication can be introduced later with a migration if it becomes valuable.
 
-A Spotify track and a physical audio asset are separate concepts.
+### 10.2 Missing tracks
 
-Example:
+A supported Spotify track is missing when current desired state references it and Offbeat has no valid managed file for it.
 
-```text
-spotify:track:A ─┐
-                 ├── local asset X
-spotify:track:B ─┘
-```
+`offbeat missing` should report these tracks through the daemon.
 
-Multiple Spotify track IDs may map to one physical asset.
+Unsupported Spotify entries are not included in missing-track counts.
 
-A physical asset may be deleted only when no currently desired Spotify track references it.
+### 10.3 File lifecycle
 
----
+v1 should be conservative about deletion. Removing a Spotify reference must immediately update desired state and generated playlists, but physical-file deletion does not need to be automatic in the first release.
 
-# 16. Matching and Deduplication
+No required v1 behavior may delete files outside Offbeat's managed root.
 
-v1 uses metadata-based matching.
+## 11. Acquisition
 
-Relevant signals include:
+### 11.1 Scope
 
-* normalized track title;
-* normalized artist set;
-* duration;
-* album as a supporting signal;
-* meaningful version markers.
+v1 uses `yt-dlp` for the concrete authorized-media retrieval workflow selected in the M6 spec.
 
-The matcher must not blindly erase semantic differences such as:
+The rest of the daemon should not depend on `yt-dlp` command-line syntax directly. A small internal interface/process wrapper is sufficient.
 
-```text
-Live
-Acoustic
-Remix
-Radio Edit
-Extended Mix
-Instrumental
-```
+### 11.2 Work persistence
 
-Album equality is not mandatory for deduplication.
-
----
-
-# 17. Match Confidence
-
-Matches are classified as:
-
-```text
-high
-medium
-low
-```
-
-## High confidence
-
-May be accepted automatically.
-
-It requires strong metadata agreement and no meaningful conflicting version information.
-
-## Medium confidence
-
-Must enter the review queue.
-
-Example:
-
-```bash
-offbeat review
-```
-
-The user may:
-
-```text
-accept
-reject
-skip
-```
-
-Accepted/rejected decisions persist.
-
-## Low confidence
-
-Remains unresolved.
-
-An unresolved track must never block other tracks from becoming available.
-
----
-
-# 18. Missing Tracks
-
-A Spotify track is considered missing when:
-
-* Spotify desires it;
-* no valid local asset is mapped to it.
-
-Missing tracks remain fully represented in SQLite.
-
-Example:
-
-```text
-Spotify playlist:
-
-A
-B [missing]
-C
-D [missing]
-E
-```
-
-Generated M3U8:
-
-```text
-A
-C
-E
-```
-
-Playable tracks retain their Spotify relative ordering.
-
----
-
-# 19. Acquisition Pipeline
-
-v1 supports only one downloader implementation:
-
-```text
-yt-dlp
-```
-
-The internal architecture must still separate the downloader through an interface so the rest of the daemon does not depend on yt-dlp command-line details.
-
-Logical states may include:
+Acquisition may take long enough that daemon restart should not silently lose requested work. Persist only the minimal states required for safe restart and user-visible failure, for example:
 
 ```text
 pending
-resolving
-downloading
-normalizing
-ready
-failed-temporary
-unresolved
-failed-permanent
-review-required
+running
+failed
+complete
 ```
 
-Exact internal names are implementation-defined.
+Exact names are implementation-defined.
 
----
+Bounded concurrency is required. A simple manual retry is acceptable for v1; complex retry scheduling is not required unless real failure behavior demonstrates a need.
 
-# 20. Acquisition Queue
+### 11.3 Media processing
 
-Acquisition work must:
+After successful authorized retrieval, Offbeat may use FFmpeg when technically necessary for a supported output/container. Avoid transcoding solely to save disk space.
 
-* persist in SQLite;
-* survive daemon restarts;
-* have bounded concurrency;
-* default to a conservative concurrency such as 2;
-* allow configuration;
-* classify temporary vs permanent/unresolved failures;
-* retry temporary failures with capped exponential backoff;
-* avoid infinite retries for permanent/unresolved failures.
+Managed filenames must be filesystem-safe, stable, and collision-resistant.
 
----
+Presentation metadata from Spotify may be written to files where practical, but artwork or optional tagging failure must not prevent otherwise usable audio from becoming available.
 
-# 21. Auto-Acquisition
+## 12. Desktop playlist generation
 
-After every successful Spotify reconciliation:
-
-```text
-new missing tracks
-      ↓
-auto_acquire?
-```
-
-When:
-
-```toml
-auto_acquire = true
-```
-
-eligible missing tracks automatically enter acquisition.
-
-When false:
-
-* metadata sync still completes;
-* playlists still reconcile;
-* missing state still updates;
-* acquisition does not start until explicitly requested.
-
----
-
-# 22. First Bootstrap
-
-The first successful Spotify snapshot is special.
-
-If the library initially contains a large number of missing tracks, acquisition must not start silently.
-
-Example:
-
-```text
-Spotify import complete.
-
-Desired tracks: 2013
-Available: 0
-Missing: 2013
-
-Initial acquisition approval required.
-```
-
-The daemon enters a bootstrap-pending state.
-
-The user explicitly approves initial acquisition through the CLI.
-
-After that:
-
-```text
-auto_acquire = true
-```
-
-works normally for future changes.
-
----
-
-# 23. Media Processing
-
-The acquisition pipeline is logically:
-
-```text
-SourceResolver
-      ↓
-Downloader
-      ↓
-temporary media
-      ↓
-Normalizer
-      ↓
-Tagger
-      ↓
-managed asset
-```
-
-`yt-dlp` is responsible for media retrieval.
-
-Offbeat owns normalization/tagging.
-
-FFmpeg is used only when technically necessary.
-
----
-
-# 24. Audio Quality Policy
-
-v1 must avoid over-engineering audio quality.
-
-Rule:
-
-> Quality takes priority over disk usage.
-
-Offbeat should:
-
-* preserve good source quality;
-* avoid transcoding simply to save storage;
-* accept FLAC;
-* accept MP3;
-* accept AAC/M4A;
-* accept Opus;
-* use FFmpeg when compatibility/container/tagging requirements justify it;
-* maintain one canonical asset representation for both desktop and Android.
-
-No per-device quality variants exist in v1.
-
----
-
-# 25. Metadata and Artwork
-
-Spotify is authoritative for presentation metadata where available.
-
-Managed assets should receive:
-
-* title;
-* artist;
-* album;
-* track/disc metadata when appropriate;
-* artwork.
-
-Artwork should be embedded when supported by the container.
-
-Artwork-fetch failure:
-
-* must not block audio availability;
-* should remain retryable.
-
----
-
-# 26. Managed Filenames
-
-Track filenames should be:
-
-* human-readable;
-* stable;
-* collision-resistant.
-
-Recommended pattern:
-
-```text
-<artist> - <title> [<stable-id>].ext
-```
-
-Sanitization is required for filesystem safety.
-
-The stable suffix prevents collisions.
-
----
-
-# 27. Playlist Generation
-
-Desktop playlists live under:
+Generate flat UTF-8 M3U playlists under:
 
 ```text
 ~/Music/Offbeat/playlists/
 ```
 
-Format:
+At minimum:
 
-```text
-M3U8
-```
+- one Liked Songs playlist;
+- one file per Spotify playlist.
 
-Playlists are flat.
+Rules:
 
-Spotify playlist-folder structure is ignored.
+- include only tracks with an available managed file;
+- preserve relative Spotify ordering among included entries;
+- preserve duplicate occurrences;
+- use Spotify playlist identity internally so rename does not create a second logical playlist;
+- handle duplicate playlist names with deterministic collision-safe filenames;
+- update/remove stale generated playlist files owned by Offbeat when safe.
 
----
+An ordinary desktop music player must be able to open the generated playlists.
 
-# 28. Playlist Identity and Names
+## 13. Android manual sync
 
-Spotify playlist ID is the persistent identity.
+### 13.1 Scope
 
-Playlist name is mutable presentation data.
+Android v1 synchronizes the daemon's current playable library to one phone on the same LAN.
 
-When Spotify renames:
+A manual configuration/address and a manual **Sync now** action are acceptable.
 
-```text
-Coding
-→ Programming
-```
+The Android app must not depend on Spotify.
 
-the generated M3U8 filename should rename accordingly.
+### 13.2 Minimum sync model
 
-Old generated playlist files must be removed.
+The daemon exposes a current-state manifest sufficient for the phone to determine the desired Offbeat-owned files and playlists. The design should use stable identities/paths and sizes or other minimal metadata needed for correct current-state comparison.
 
----
+The client:
 
-# 29. Duplicate Playlist Names
+1. obtains the current manifest;
+2. downloads files it does not have or needs to replace;
+3. places completed files into its Offbeat-owned directory;
+4. removes obsolete Offbeat-owned files when the sync plan safely identifies them;
+5. writes/replaces playlists after required files for that sync are available;
+6. records enough local state to make the next manual sync efficient.
 
-When names are unique:
+A failed file transfer may restart that file from the beginning. Resume support is deferred.
 
-```text
-Coding.m3u8
-```
+### 13.3 Security
 
-When multiple Spotify playlists share the same name, append a short stable identity suffix:
+The LAN API must not be anonymously writable or expose Offbeat data to arbitrary network clients. M8 must choose the smallest practical authenticated transport for one personal device. The product does not require a generalized pairing/device-management subsystem before that concrete design exists.
 
-```text
-Coding [a1b2c3].m3u8
-Coding [f9e8d7].m3u8
-```
+### 13.4 Offline result
 
-Do not expose IDs unnecessarily when there is no collision.
+After a successful sync, ordinary Android local music players must be able to read the synchronized audio and playlists without Spotify, Internet access, or a live desktop connection.
 
----
+## 14. Setup and platform assumptions
 
-# 30. Liked Songs
+Desktop v1 supports Linux.
 
-Liked Songs is modeled separately from Spotify playlists internally but materialized as:
+Expected external prerequisites may include:
 
-```text
-Liked Songs.m3u8
-```
+- Spotify Desktop;
+- Spicetify;
+- `yt-dlp`;
+- FFmpeg when required by the selected media path.
 
-Its Spotify ordering must be preserved.
+Offbeat does not need to install those external applications automatically.
 
----
+The project should provide clear installation/configuration documentation and may provide focused helpers for directories, Adapter credential provisioning, systemd user service setup, or extension configuration. A single `offbeat setup` command that automates every prerequisite is not a v1 completion requirement.
 
-# 31. Duplicate Playlist Entries
+The daemon should be usable as a `systemd --user` service for normal Linux operation.
 
-If Spotify intentionally includes the same track multiple times in a playlist, Offbeat must preserve every occurrence.
+## 15. Reliability requirements
 
-One physical asset may therefore appear multiple times in one M3U8 file.
+v1 must have automated tests for failure modes that threaten user state, especially:
 
----
+- malformed/incomplete Spotify candidate rejection;
+- failed SQLite candidate commit rollback;
+- ordering and duplicate preservation;
+- playlist rename/deletion behavior;
+- daemon restart with committed Spotify state intact;
+- acquisition work surviving restart when marked persistent;
+- failed acquisition not blocking unrelated tracks;
+- generated playlist correctness;
+- interrupted Android sync leaving already-completed desktop/Android content usable;
+- no mutation outside Offbeat-owned state/directories.
 
-# 32. Removal Semantics
+Tests should prefer controlled fixtures and local fakes. CI must not require Spotify, Spicetify, copyrighted external media, or a physical Android device except for explicit manual acceptance gates.
 
-Spotify is authoritative for desired state.
+## 16. v1 acceptance scenario
 
-If a track becomes unreferenced by:
+v1 is complete when the following end-to-end scenario works:
 
-* all playlists;
-* and Liked Songs;
+1. `offbeatd` starts for the Linux user.
+2. Spotify Desktop with the Offbeat Spicetify extension connects to the daemon.
+3. `offbeat spotify sync` collects a complete normalized candidate.
+4. The daemon atomically commits the current Spotify desired state.
+5. `offbeat missing` accurately identifies supported desired tracks without managed files.
+6. The user supplies/uses the supported authorized acquisition workflow for a missing track set.
+7. Successful acquisitions appear as managed local audio files.
+8. Offbeat generates desktop `.m3u8` playlists containing available tracks in Spotify order with duplicates preserved.
+9. A normal desktop player can play the managed files/playlists.
+10. One Android phone manually connects/authenticates to Offbeat over the LAN and runs a sync.
+11. The phone receives the current playable audio and playlists.
+12. A normal Android music player can play them.
+13. Already-produced desktop and phone content remains usable after Spotify, Internet access, and the desktop sync service are unavailable.
 
-then its local asset becomes eligible for deletion.
+## 17. Planning rule
 
-Deletion behavior is immediate at the logical state level.
+Do not add infrastructure to v1 solely because it might be useful later.
 
-Physical deletion may wait until Offbeat-controlled operations release the file.
-
-If an asset is shared by other still-desired Spotify tracks, it must remain.
-
----
-
-# 33. Missing/Corrupt Local Assets
-
-If Offbeat detects that a referenced managed asset:
-
-* disappeared;
-* is invalid;
-* fails explicit verification;
-
-the corresponding track returns to missing state.
-
-When auto-acquire is enabled, acquisition may automatically be queued again.
-
-Normal reconciliation should perform lightweight existence checking.
-
-Full integrity verification occurs through:
-
-```bash
-offbeat verify
-```
-
-which may perform SHA-256 verification.
-
----
-
-# 34. Revision History
-
-Offbeat should retain lightweight revision/diff history.
-
-Example:
-
-```text
-Revision 42
-+7 tracks
--2 tracks
-Coding: +3 / -1
-```
-
-The system does not need to retain every complete raw Spotify snapshot indefinitely.
-
-History exists primarily for:
-
-* debugging;
-* explaining automatic deletions;
-* inspection.
-
----
-
-# 35. Android Companion
-
-The Android component is a native Kotlin application.
-
-Recommended technologies:
-
-* Kotlin;
-* Jetpack Compose;
-* WorkManager;
-* Android shared media storage / MediaStore.
-
-It is a sync utility only.
-
-It does not implement:
-
-* playback;
-* library browsing;
-* search;
-* playlist editing;
-* Spotify login;
-* Spotify metadata access.
-
----
-
-# 36. Android UI Scope
-
-Minimum UI:
-
-```text
-Pair PC
-
-Home:
-    PC status
-    last sync
-    current revision
-    number of tracks
-    storage usage
-    sync progress
-
-    [Sync now]
-
-Settings:
-    Auto Sync
-    Pair/Unpair
-    connection status
-```
-
-Error/progress states must be visible.
-
----
-
-# 37. Android Storage
-
-Default output:
-
-```text
-Music/Offbeat/
-├── tracks/
-└── playlists/
-```
-
-Audio must live in shared media storage so ordinary Android music players can access it.
-
-Playlists use standard `.m3u8`.
-
-Android is a read-only replica.
-
-It never independently:
-
-* edits tags;
-* renames Offbeat files;
-* changes playlists;
-* sends playlist/like modifications upstream.
-
----
-
-# 38. Android Desired State
-
-Android receives only the union of currently Spotify-referenced, locally playable tracks.
-
-It does not automatically receive unrelated/orphaned desktop assets.
-
-Android playlists mirror the daemon-generated playable playlist state.
-
----
-
-# 39. Pairing
-
-Pairing uses a one-time code.
-
-Example:
-
-```bash
-$ offbeat pair
-
-Waiting for device...
-Pairing code: 482913
-```
-
-Android discovers or manually connects to the daemon and submits the code.
-
-Successful pairing creates:
-
-* a persistent device ID;
-* a per-device credential;
-* trust in the daemon's certificate/fingerprint.
-
-No cloud account is required.
-
----
-
-# 40. LAN Discovery
-
-Preferred discovery:
-
-```text
-mDNS / DNS-SD
-```
-
-Example conceptual service:
-
-```text
-_offbeat._tcp.local
-```
-
-Manual host/IP entry must exist as a fallback.
-
-Authentication, not SSID identity, determines trust.
-
----
-
-# 41. Transport Security
-
-PC ↔ Android synchronization uses HTTPS.
-
-The daemon generates its own certificate.
-
-During pairing, Android pins the daemon certificate/fingerprint.
-
-Subsequent requests use the device credential over the encrypted channel.
-
-No external certificate authority is required.
-
----
-
-# 42. Multi-Device Model
-
-The domain model supports multiple read-only client devices.
-
-Each device may have:
-
-```text
-device_id
-name
-credential
-last_sync
-last_revision
-```
-
-v1 needs to be implemented and tested with only one Android device.
-
----
-
-# 43. Sync Initiation
-
-Android initiates synchronization.
-
-Supported modes:
-
-### Manual
-
-```text
-Sync now
-```
-
-### Automatic
-
-WorkManager opportunistically performs sync when:
-
-* Wi-Fi/network conditions permit;
-* the paired Offbeat daemon is discoverable/reachable.
-
-Instant background synchronization is not required.
-
----
-
-# 44. Revisioned Sync
-
-The daemon publishes immutable logical library revisions.
-
-A revision manifest contains at minimum:
-
-* revision ID;
-* required assets;
-* asset paths/identities;
-* content hashes;
-* playlist files and hashes.
-
-Android may jump directly from any old state to the newest revision.
-
-Historical revisions do not need to be replayed.
-
----
-
-# 45. Delta Sync
-
-Android compares its current Offbeat state against the newest manifest.
-
-The resulting plan may contain:
-
-```text
-download assets
-delete assets
-replace playlists
-```
-
-All diff logic should preferably remain daemon-driven or manifest-driven rather than reproducing Spotify semantics on Android.
-
----
-
-# 46. Transfer Integrity
-
-Asset downloads support:
-
-```text
-HTTP Range
-```
-
-for resuming interrupted transfers.
-
-Every completed file must be checked against its expected SHA-256 before publication.
-
-Files are downloaded to temporary state first.
-
-Only verified files become visible as final managed media.
-
----
-
-# 47. Android Commit Semantics
-
-Synchronization is not globally transactional, but must preserve usability.
-
-Required order:
-
-1. compute plan;
-2. verify sufficient storage;
-3. download required files;
-4. resume interrupted files when possible;
-5. verify each completed file;
-6. publish verified assets;
-7. remove obsolete Offbeat assets according to the plan;
-8. replace playlist files last;
-9. commit local revision marker.
-
-If sync fails midway, the previously valid playlists should remain usable.
-
----
-
-# 48. Android Storage Preflight
-
-Before modifying the Android library, Offbeat must determine whether enough storage is available.
-
-If storage is insufficient:
-
-```text
-Need: X
-Free: Y
-```
-
-then synchronization must stop before making any changes.
-
-v1 does not partially synchronize merely because some files fit.
-
----
-
-# 49. Configuration
-
-Default config path:
-
-```text
-~/.config/offbeat/config.toml
-```
-
-Configuration may include:
-
-```text
-managed media path
-auto_acquire
-acquisition concurrency
-yt-dlp executable path
-ffmpeg executable path
-local ports
-sync settings
-```
-
-CLI flags may temporarily override selected settings.
-
-Secrets must not be stored as plain ordinary config values where avoidable.
-
----
-
-# 50. Local Adapter Authentication
-
-The Spicetify WebSocket binds only to loopback.
-
-A random adapter credential is generated during setup.
-
-The extension uses that credential when connecting.
-
----
-
-# 51. Setup
-
-```bash
-offbeat setup
-```
-
-should configure components Offbeat controls:
-
-* config/data directories;
-* SQLite initialization;
-* certificates/secrets;
-* systemd user service;
-* Spicetify extension installation/linking;
-* prerequisite checks.
-
-It must check for:
-
-```text
-Spotify
-Spicetify
-yt-dlp
-FFmpeg
-```
-
-but does not install those external dependencies itself.
-
----
-
-# 52. Platform Requirements
-
-Desktop v1:
-
-```text
-Linux only
-systemd --user
-Spotify Desktop
-Spicetify
-yt-dlp
-FFmpeg
-```
-
-Android:
-
-```text
-native Android application
-```
-
-Cross-platform desktop support is deferred.
-
----
-
-# 53. Observability
-
-The daemon must produce useful structured logs for:
-
-* startup;
-* Spotify adapter connection/disconnection;
-* snapshot success/failure;
-* reconciliation;
-* acquisition;
-* review decisions;
-* file deletion;
-* Android pairing;
-* Android sync;
-* errors.
-
-Logs must never expose long-lived device/adapter credentials.
-
----
-
-# 54. Reliability Requirements
-
-The implementation must tolerate:
-
-* daemon restart;
-* Spotify restart;
-* Spotify being absent;
-* failed snapshot fetch;
-* network interruption;
-* failed acquisition;
-* interrupted Android transfer;
-* Android being offline for long periods;
-* phone jumping many revisions;
-* managed file disappearing;
-* playlist rename;
-* playlist deletion;
-* duplicate playlist names.
-
----
-
-# 55. Testing Requirements
-
-Tests are mandatory.
-
-At minimum, automated coverage must exist for:
-
-### Spotify state
-
-* full-snapshot commit;
-* failed candidate snapshot rollback;
-* playlist rename;
-* playlist deletion;
-* ordering;
-* duplicate entries;
-* Liked Songs;
-* unsupported placeholder entries.
-
-### Reconciliation
-
-* added track;
-* removed track;
-* shared asset reference counting;
-* deletion only after last reference disappears;
-* missing asset recovery.
-
-### Matching
-
-* high-confidence auto-match;
-* medium-confidence review;
-* rejected match persistence;
-* duplicate metadata cases;
-* meaningful version distinction.
-
-### Acquisition
-
-* persistent queue;
-* bounded concurrency;
-* retryable failure;
-* permanent/unresolved failure;
-* restart recovery.
-
-### Playlist generation
-
-* relative order preservation;
-* missing-track omission;
-* duplicate playlist names;
-* rename cleanup.
-
-### Android sync
-
-* pairing;
-* manifest generation;
-* direct old→latest revision reconciliation;
-* interrupted transfer resume;
-* hash mismatch;
-* storage preflight;
-* playlist replacement last;
-* asset deletion;
-* reconnect after daemon restart.
-
-End-to-end tests must use synthetic/test media, not depend on real copyrighted media.
-
----
-
-# 56. Main v1 Acceptance Scenario
-
-v1 is complete when the following works end-to-end:
-
-1. Linux login starts `offbeatd` through `systemd --user`.
-2. Spotify starts.
-3. Offbeat's Spicetify extension connects to the daemon.
-4. The extension collects all supported playlists and Liked Songs.
-5. The daemon receives a complete valid candidate snapshot.
-6. The snapshot is atomically committed.
-7. Missing tracks are identified.
-8. Initial acquisition waits for explicit first-time approval.
-9. After approval, eligible missing tracks enter the persistent acquisition pipeline.
-10. Successfully acquired media becomes managed Offbeat assets.
-11. Metadata/artwork is applied where possible.
-12. Desktop M3U8 playlists are generated.
-13. Playable tracks preserve Spotify ordering.
-14. A subsequent Spotify snapshot correctly handles additions, removals, and renames.
-15. Assets no longer referenced by Spotify are deleted when their reference count reaches zero.
-16. Android discovers or manually connects to the daemon.
-17. Android pairs with a one-time code.
-18. Android requests the newest revision.
-19. Android performs storage preflight.
-20. Android downloads only required playable assets.
-21. Interrupted downloads can resume.
-22. SHA-256 verification succeeds before publication.
-23. Android playlists are committed after their required assets.
-24. An existing Android local music player can read the files/playlists.
-25. After Spotify, the Internet, and the Linux PC become unavailable, already-synchronized Android tracks remain playable offline.
-
----
-
-# 57. Definition of v1 Done
-
-v1 is done only when:
-
-* all acceptance scenario steps work;
-* all destructive synchronization behavior has automated tests;
-* first-time setup can be reproduced on a clean supported Linux environment;
-* daemon restarts do not lose acquisition work or Spotify state;
-* no component other than the daemon owns SQLite;
-* Android contains no Spotify integration;
-* playback works using external music players;
-* documentation describes setup, dependencies, architecture, recovery, and known limitations.
+When a later milestone reveals a concrete need for a deferred feature, add the smallest design that solves that observed problem through a scoped issue/ADR and a versioned migration where necessary.

@@ -1,7 +1,12 @@
-# Test fixtures live here.
+# Test fixtures
 
-Fixtures are added by later milestones as needed:
-- M2+: synthetic Spicetify snapshot fixtures
-- M3+: real-shaped Spotify playlist payloads (as JSON)
-- M5+: synthetic audio assets
-- M9+: local HTTP servers for downloader tests
+Add fixtures only when a current feature needs them. Expected categories include:
+
+- Adapter protocol and normalized Spotify candidate fixtures;
+- M4 desired-state persistence/reconciliation fixtures;
+- M5+ synthetic managed audio files;
+- M6 controlled acquisition sources/local servers;
+- M7 M3U8 golden files;
+- M8 Android current-state manifest/sync fixtures.
+
+Do not create fixture frameworks for deferred features before their implementation is scoped.
