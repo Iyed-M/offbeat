@@ -43,7 +43,9 @@
     var unsupported = { position: position, kind: "unsupported" };
     if (sourceURI) unsupported.source_uri = sourceURI;
     if (source.type !== "track" || source.isPlayable === false || source.isAvailable === false) return unsupported;
-    if (!requiredString(source.uri) || !requiredString(source.name) || !Number.isSafeInteger(source.duration_ms) || source.duration_ms <= 0 || !Array.isArray(source.artists) || source.artists.length === 0 || !object(source.album)) return unsupported;
+    var durationMS = source.duration_ms;
+    if (!Number.isSafeInteger(durationMS) && object(source.duration)) durationMS = source.duration.milliseconds;
+    if (!requiredString(source.uri) || !requiredString(source.name) || !Number.isSafeInteger(durationMS) || durationMS <= 0 || !Array.isArray(source.artists) || source.artists.length === 0 || !object(source.album)) return unsupported;
     var artists = [];
     for (var index = 0; index < source.artists.length; index += 1) {
       var artist = source.artists[index];
@@ -59,7 +61,7 @@
         name: source.name,
         artists: artists,
         album: { uri: source.album.uri, name: source.album.name },
-        duration_ms: source.duration_ms
+        duration_ms: durationMS
       }
     };
   }
@@ -68,7 +70,8 @@
     var entries = [];
     var offset = 0;
     var total = null;
-    while (total === null || offset < total) {
+    var totalUnavailable = false;
+    while (totalUnavailable || total === null || offset < total) {
       var response;
       try {
         response = page(await fetchPage(offset, PAGE_LIMIT), operation, offset, onZeroPageOffset);
@@ -76,14 +79,20 @@
         if (error && error.operation) throw error;
         throw collectionError(operation, offset, "request failed");
       }
-      if (total === null) total = response.totalLength;
-      if (response.totalLength !== total || offset > total || response.items.length > total - offset || (offset < total && response.items.length === 0)) {
-        throw collectionError(operation, offset, "inconsistent pagination");
+      if (total === null && response.totalLength === 0 && response.items.length > 0) totalUnavailable = true; else if (total === null) total = response.totalLength;
+      if ((totalUnavailable && response.totalLength !== 0) || (!totalUnavailable && response.totalLength !== total) || (!totalUnavailable && (offset > total || response.items.length > total - offset || (offset < total && response.items.length === 0)))) {
+        throw collectionError(operation, offset, "inconsistent pagination: received " + response.items.length + " items for total " + response.totalLength);
       }
       for (var index = 0; index < response.items.length; index += 1) entries.push(normalizeEntry(response.items[index], entries.length, operation, offset));
       var nextOffset = offset + response.items.length;
-      if (nextOffset <= offset && offset < total) throw collectionError(operation, offset, "non-advancing pagination");
+      if (nextOffset <= offset && (totalUnavailable || offset < total)) {
+        // A zero count with nonempty items is Spotify's unavailable count sentinel.
+        // An empty page after a full unknown-count page is the only terminal signal.
+        if (totalUnavailable && response.items.length === 0) return entries;
+        throw collectionError(operation, offset, "non-advancing pagination");
+      }
       offset = nextOffset;
+      if (totalUnavailable && response.items.length < PAGE_LIMIT) return entries;
     }
     return entries;
   }
