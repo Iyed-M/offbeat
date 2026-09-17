@@ -1,456 +1,183 @@
-# Offbeat v1 — SMART Implementation Plan
+# Offbeat v1 — Lean SMART Implementation Plan
 
-> **Workflow status:** This document is the delivery roadmap, not an active task queue. Before implementation, use `/to-tickets` to turn the relevant milestone or smaller slice into dependency-linked GitHub issues. Track execution, decisions, and completion in those issues; update this roadmap only when sequencing or milestone scope changes.
+> **Workflow status:** This document is the delivery roadmap, not an active task queue. Before implementation, use `/to-spec` to publish the next milestone as a GitHub issue and `/to-tickets` to split the approved spec into dependency-linked agent-ready issues. GitHub issues are authoritative for execution.
+>
+> **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. Do not recreate removed milestones/tickets merely because they existed in the older plan.
 
-## 1. Planning Principles
+## 1. Planning principles
 
-Implementation should proceed in vertical slices.
+Implementation proceeds in vertical slices that produce observable product behavior.
 
-Every milestone must produce:
+Every milestone must have:
 
-* executable software;
-* automated tests;
-* a demonstrable behavior;
-* a clear completion gate before dependent work begins.
+- executable software;
+- automated tests around state-threatening behavior;
+- a concrete demonstration/completion gate;
+- deliberately limited scope.
 
-The sequencing should minimize simultaneous uncertainty.
+Prefer a migration later over an abstraction now. Do not build historical/reusable/generalized infrastructure until a concrete requirement needs it.
 
-The project should first prove Spotify ingestion and reconciliation, then the local managed library, then acquisition, and only then Android synchronization.
+Use Wayfinder only when a real implementation blocker depends on an uncertain external seam or unresolved product policy. It is not a default step between milestones.
 
----
+## 2. SMART definition
 
-# 2. SMART Definition
+Each milestone is:
 
-Every milestone below is:
+- **Specific:** one end-user or architectural capability;
+- **Measurable:** explicit tests and completion gate;
+- **Achievable:** avoids speculative adjacent systems;
+- **Relevant:** directly advances the v1 acceptance scenario;
+- **Time-bound:** a planning timebox used to detect scope growth, not a promise.
 
-**Specific**
-It defines one concrete capability.
+## 3. Architecture rules that survive the scope reset
 
-**Measurable**
-It has explicit automated tests and acceptance conditions.
-
-**Achievable**
-It limits scope and avoids unrelated future functionality.
-
-**Relevant**
-It directly contributes to the v1 acceptance scenario.
-
-**Time-bound**
-It has a recommended engineering timebox.
-
-The timeboxes are planning constraints, not promises. If a milestone exceeds its box, investigate scope/architecture rather than silently expanding it.
-
----
-
-# 3. Recommended Repository Structure
-
-Use one repository:
-
-```text
-offbeat/
-├── cmd/
-│   ├── offbeat/
-│   └── offbeatd/
-│
-├── internal/
-│   ├── app/
-│   ├── config/
-│   ├── db/
-│   ├── spotify/
-│   ├── reconcile/
-│   ├── library/
-│   ├── matcher/
-│   ├── acquisition/
-│   ├── downloader/
-│   │   └── ytdlp/
-│   ├── media/
-│   ├── playlists/
-│   ├── devices/
-│   ├── sync/
-│   └── ipc/
-│
-├── migrations/
-│
-├── spicetify/
-│   └── offbeat/
-│
-├── android/
-│
-├── testdata/
-│
-├── docs/
-│
-├── scripts/
-│
-├── go.mod
-└── README.md
-```
-
-Architectural rule:
-
-```text
-domain packages
-    must not depend on
-CLI / HTTP / Spicetify / Android details
-```
-
----
-
-# 4. Milestone 0 — Repository and Architecture Skeleton
-
-## Timebox
-
-**1–2 days**
-
-## Specific objective
-
-Create the repository foundation without implementing product behavior.
-
-## Deliverables
-
-Create:
-
-```text
-offbeatd
-offbeat
-Go module
-SQLite migration runner
-config loader
-logging
-testdata
-CI
-```
-
-Define core domain IDs/types for:
-
-```text
-SpotifyTrack
-Playlist
-PlaylistEntry
-LocalAsset
-Snapshot
-Revision
-Device
-AcquisitionJob
-```
-
-Do not implement the full schema yet.
-
-## Measurable acceptance criteria
-
-The following commands must work:
-
-```bash
-go test ./...
-go build ./cmd/offbeat
-go build ./cmd/offbeatd
-```
-
-`offbeatd` starts, loads config, initializes an empty SQLite DB, and exits cleanly on SIGTERM.
-
-CI runs formatting/vetting/tests.
-
-## Completion gate
-
-Do not begin feature development until:
-
-```text
-build green
-tests green
-migration framework working
-daemon lifecycle working
-```
-
----
-
-# 5. Milestone 1 — Daemon Ownership and CLI IPC
-
-## Timebox
-
-**2–3 days**
-
-## Specific objective
-
-Establish the architectural rule that the daemon owns all state.
-
-## Deliverables
-
-Implement Unix-domain-socket control API.
-
-Initial commands:
-
-```bash
-offbeat status
-offbeat config
-```
-
-Implement:
+The following M1–M3 decisions remain required:
 
 ```text
 CLI
- ↓
-Unix socket
- ↓
-daemon
- ↓
-SQLite
+  -> local Unix Control protocol
+  -> Daemon owner
+  -> SQLite / managed state
 ```
 
-The CLI must never open SQLite.
+and:
 
-## Tests
-
-Automated tests must prove:
-
-* daemon creates socket;
-* CLI reaches daemon;
-* daemon shutdown removes/invalidates socket safely;
-* CLI produces understandable error when daemon unavailable.
-
-## Completion gate
-
-```bash
-offbeat status
+```text
+Spotify Desktop
+  -> Spicetify extension
+  -> authenticated loopback Adapter protocol
+  -> Daemon owner
 ```
 
-must report daemon/database status exclusively through IPC.
+Rules:
+
+- only `offbeatd` owns SQLite and managed mutation;
+- the CLI does not open SQLite;
+- Spotify/Spicetify private response shapes stay inside the extension adapter;
+- a candidate snapshot is complete-or-rejected;
+- playlist/Liked ordering and duplicate occurrences are preserved;
+- unsupported normalized placeholders are not silently dropped.
+
+## 4. Completed foundation — M0 to M3
+
+### M0 — Repository and architecture skeleton
+
+Completed foundation: Go module, daemon/CLI skeleton, configuration, logging, SQLite migration runner, CI, basic domain IDs/types.
+
+### M1 — Daemon ownership and CLI IPC
+
+Completed foundation: single Daemon owner, user-private Unix control socket, daemon-served status/config, lifecycle and protocol guarantees.
+
+### M2 — Spicetify adapter connectivity
+
+Completed foundation: authenticated loopback WebSocket Adapter endpoint, one Adapter session, correlated Snapshot requests, liveness/reconnect, CLI-triggered sync transport.
+
+### M3 — Real Spotify candidate collection
+
+Completed foundation: normalized complete candidate collection through Spicetify Platform APIs, recursive playlists, Liked Songs, pagination validation, ordering/duplicates, unsupported placeholders, bounded collection errors, real-client validation.
+
+M3 intentionally does not persist Spotify state.
 
 ---
 
-# 6. Milestone 2 — Spicetify Adapter Connectivity
+# 5. Milestone 4 — Persist Current Spotify Desired State
 
 ## Timebox
 
-**3–4 days**
+**2–3 engineering days**
 
-## Specific objective
+## Objective
 
-Establish reliable bidirectional communication between Spotify/Spicetify and the daemon.
-
-## Deliverables
-
-Implement:
-
-```text
-Spicetify extension
-      ↓
-localhost WebSocket
-      ↓
-offbeatd
-```
-
-Features:
-
-* adapter token;
-* connect;
-* reconnect;
-* daemon knows connected/disconnected state;
-* daemon can send `snapshot.request`;
-* extension can respond with a synthetic test snapshot.
-
-Add:
-
-```bash
-offbeat status
-```
-
-output indicating:
-
-```text
-Spotify adapter: connected/disconnected
-```
-
-## Tests
-
-Use a fake WebSocket adapter in Go integration tests.
-
-Must test:
-
-* valid authentication;
-* invalid authentication;
-* connection loss;
-* reconnection;
-* request/response correlation.
-
-## Completion gate
-
-With Spotify running:
-
-```bash
-offbeat spotify sync
-```
-
-must successfully request a synthetic snapshot from the extension and wait for the result.
-
-No real Spotify parsing requirement yet.
-
----
-
-# 7. Milestone 3 — Real Spotify Snapshot Collection
-
-## Timebox
-
-**4–6 days**
-
-## Specific objective
-
-Collect real Liked Songs and all supported Spotify playlists through Spicetify.
+Turn the validated M3 candidate into durable current Spotify desired state with one atomic SQLite commit.
 
 ## Deliverables
 
-Extension must:
-
-1. enumerate playlists;
-2. fetch every page;
-3. fetch Liked Songs;
-4. preserve ordering;
-5. preserve duplicate entries;
-6. mark unsupported entries;
-7. send one complete candidate snapshot.
-
-Implement strict candidate completion semantics.
-
-## Important architecture constraint
-
-All Spicetify/Spotify private API calls must live behind a thin adapter module.
-
-Example:
+Introduce only the schema required for current state, approximately:
 
 ```text
-SpotifyAdapter
-├── listPlaylists()
-├── fetchPlaylist()
-└── fetchLikedSongs()
-```
-
-No daemon/domain logic may depend on Spotify internal response shapes.
-
-This is necessary because Spicetify/Spotify private APIs may change.
-
-## Tests
-
-Create fixtures representing:
-
-* multiple playlists;
-* empty playlist;
-* duplicate playlist track;
-* pagination;
-* unsupported entry;
-* simulated failed page.
-
-## Measurable acceptance criteria
-
-Running:
-
-```bash
-offbeat spotify sync
-```
-
-against real Spotify must report counts matching the visible account within supported semantics.
-
-If any required fetch fails:
-
-```text
-snapshot rejected
-previous state unchanged
-```
-
-## Completion gate
-
-No reconciliation work begins until real snapshots can be repeatedly collected and rejected atomically on deliberate failure.
-
----
-
-# 8. Milestone 4 — Spotify State Model and Atomic Reconciliation
-
-## Timebox
-
-**4–5 days**
-
-## Specific objective
-
-Persist Spotify as desired state and compute deterministic revisions.
-
-## Deliverables
-
-Implement schema for:
-
-```text
-snapshots
 spotify_tracks
 playlists
 playlist_entries
 liked_entries
-revisions
-revision_changes
+state_metadata
 ```
 
-Snapshot commit must occur in one SQLite transaction.
+The exact schema is implementation-owned, but it must preserve:
 
-Implement reconciliation diff:
+- stable Spotify URI/identity;
+- mutable playlist names;
+- supported track metadata required downstream;
+- ordered entries;
+- duplicate occurrences;
+- unsupported ordered placeholders;
+- current state revision;
+- last committed timestamp.
 
-```text
-added tracks
-removed references
-playlist rename
-playlist addition/deletion
-entry ordering changes
-liked changes
-```
+Refactor the M3 daemon boundary so strict candidate validation yields a typed normalized candidate value that the persistence/reconciliation code can consume. Do not expose Spotify Desktop private objects to Go.
 
-Implement:
+Apply a valid candidate in one SQLite transaction.
 
-```bash
-offbeat history
-offbeat missing
-```
+Maintain a monotonically increasing current-state revision. Increment it only when desired state changes; a no-op sync may leave it unchanged.
 
-initially without acquisition.
+`offbeat spotify sync` should report a concise post-commit summary. Detailed historical change storage is not required.
 
 ## Tests
 
-Must prove:
+Prove at minimum:
 
-* failed snapshot changes nothing;
-* valid snapshot updates everything atomically;
-* order is preserved;
-* duplicate entries survive;
-* playlist rename preserves ID;
-* playlist deletion removes desired playlist;
-* Liked Songs changes correctly.
+- first candidate creates the exact expected desired state;
+- candidate A -> B yields the exact expected current state;
+- failed transaction leaves A completely unchanged;
+- playlist order and duplicate occurrences survive persistence;
+- playlist rename keeps the same Spotify identity;
+- deleted playlists disappear from desired state;
+- Liked Songs additions/removals/order changes are correct;
+- unsupported placeholders remain represented and ordered;
+- no-op candidate does not needlessly advance the state revision;
+- daemon restart reads the previously committed state.
+
+## Out of scope
+
+- historical snapshots;
+- `revision_changes` event logs;
+- `offbeat history`;
+- local audio assets;
+- acquisition;
+- playlist-file generation;
+- Android.
 
 ## Completion gate
 
-Given fixture snapshots A and B, applying:
+Given deterministic candidate fixtures A and B:
 
 ```text
-A → B
+fresh DB + A -> exact state A
+state A + B -> exact state B
+state B + B -> same logical state/revision
+injected commit failure -> state B unchanged
 ```
-
-must always produce exactly the expected deterministic DB state and revision diff.
 
 ---
 
-# 9. Milestone 5 — Managed Library and Asset Model
+# 6. Milestone 5 — Managed Tracks and Missing State
 
 ## Timebox
 
-**4–5 days**
+**2–3 engineering days**
 
-## Specific objective
+## Objective
 
-Introduce playable local assets independently of acquisition.
+Represent whether each supported desired Spotify track has a usable Offbeat-managed local file.
 
 ## Deliverables
 
-Implement:
+Use a deliberately simple v1 relationship:
 
 ```text
-LocalAsset
-SpotifyTrackAssetMapping
+Spotify track -> zero or one managed file
 ```
 
-Managed root:
+Create the managed root:
 
 ```text
 ~/Music/Offbeat/
@@ -458,107 +185,112 @@ Managed root:
 └── playlists/
 ```
 
-Implement hybrid stable filenames.
+Implement stable collision-safe managed filenames and the minimum database fields needed to associate a supported Spotify track with its managed file.
 
-Add an internal test mechanism that places synthetic audio fixtures into the managed library and maps them to Spotify tracks.
+Implement daemon-backed:
 
-Do not implement scanning arbitrary external music directories.
+```bash
+offbeat missing
+```
+
+A missing track is a supported currently desired track without a valid managed file. Unsupported Spotify placeholders are never missing tracks.
+
+Provide a controlled test mechanism for registering/placing synthetic local audio fixtures; do not scan arbitrary external music directories.
 
 ## Tests
 
 Prove:
 
-* one asset can serve multiple Spotify tracks;
-* duplicate playlist references use one physical file;
-* reference count reaches zero correctly;
-* referenced shared asset is never prematurely deleted;
-* missing physical file becomes missing state.
+- desired supported track with no file is missing;
+- registering a managed file makes it available;
+- missing physical file returns the track to missing state;
+- one Spotify track maps to at most one managed file in v1;
+- duplicate playlist references do not create duplicate physical files;
+- unsupported entries do not appear in `missing`;
+- all managed mutation stays under the configured managed root.
+
+## Out of scope
+
+- cross-track asset deduplication;
+- fuzzy metadata matching;
+- review queues;
+- automatic deletion;
+- deep integrity verification;
+- acquisition.
 
 ## Completion gate
 
-Spotify desired state + manually supplied test assets must produce an accurate playable/missing model.
+Fixture desired state plus fixture managed files produces an exact available/missing set through the daemon and CLI.
 
 ---
 
-# 10. Milestone 6 — Matching and Review Queue
+# 7. Milestone 6 — Minimal Authorized Acquisition
 
 ## Timebox
 
-**4–6 days**
+**4–6 engineering days**
 
-## Specific objective
+## Objective
 
-Implement conservative metadata matching.
+Given a supported missing Spotify track and an authorized source supported by the v1 workflow, produce its managed local audio file reliably.
 
 ## Deliverables
 
-Normalize:
+Define the concrete authorized source input/workflow in the M6 spec. Do not introduce an automatic arbitrary search flow for copyrighted Spotify tracks.
+
+Keep `yt-dlp` behind a small internal process/interface boundary so command syntax does not leak through the application.
+
+Persist only restart-relevant acquisition work. A small state set such as:
 
 ```text
-title
-artists
-duration
-album support signal
-version markers
+pending
+running
+failed
+complete
 ```
 
-Classify:
+is preferred unless implementation evidence requires another state.
 
-```text
-high
-medium
-low
-```
+Requirements:
 
-Implement persistent review queue.
-
-CLI:
-
-```bash
-offbeat review
-```
-
-must allow:
-
-```text
-accept
-reject
-skip
-```
-
-Decisions persist.
+- bounded concurrency;
+- daemon restart does not silently lose requested persistent work;
+- one failed track does not block unrelated work;
+- manual retry is sufficient for v1 unless a concrete transient-failure requirement justifies automatic retry;
+- use FFmpeg only when technically required;
+- write finished media atomically into the managed root;
+- produce stable safe filenames;
+- optional artwork/tagging failure does not invalidate otherwise usable audio.
 
 ## Tests
 
-Fixture cases must include:
+Use controlled/local fixtures rather than copyrighted Internet media.
 
-```text
-same recording / different album
-live vs studio
-radio edit vs original
-remix vs original
-minor duration difference
-conflicting artists
-ambiguous candidates
-```
+Test:
+
+- successful acquisition to managed file;
+- process/tool failure;
+- restart recovery of persistent work;
+- bounded concurrency;
+- unrelated work continues after one failure;
+- partial/temp files are not published as usable tracks;
+- output never escapes the managed root.
 
 ## Completion gate
 
-No automatic acquisition should depend on matching until high-confidence cases show near-zero false positives in the project's fixture suite.
-
-Bias toward unresolved rather than incorrect.
+An authorized controlled source can turn a fixture missing track into an available managed track through daemon-owned work.
 
 ---
 
-# 11. Milestone 7 — Playlist Materialization
+# 8. Milestone 7 — Desktop M3U8 Materialization
 
 ## Timebox
 
-**2–3 days**
+**1–2 engineering days**
 
-## Specific objective
+## Objective
 
-Generate correct desktop M3U8 playlists.
+Produce ordinary desktop playlists from current desired state and available managed tracks.
 
 ## Deliverables
 
@@ -566,1022 +298,201 @@ Generate:
 
 ```text
 Liked Songs.m3u8
-<Playlist>.m3u8
+<playlist>.m3u8
 ```
+
+under the managed `playlists/` directory.
 
 Rules:
 
-* omit missing tracks;
-* retain relative Spotify ordering;
-* retain duplicate occurrences;
-* support duplicate playlist names;
-* remove stale filename after rename;
-* delete playlist file after Spotify playlist deletion.
+- omit missing/unsupported entries;
+- preserve relative Spotify ordering of included tracks;
+- preserve duplicate occurrences;
+- use Spotify playlist identity internally;
+- rename updates the generated filename safely;
+- duplicate Spotify playlist names get deterministic collision-safe filenames;
+- deleted playlists remove their Offbeat-owned generated playlist file.
+
+Regenerate after relevant desired-state or managed-track changes.
 
 ## Tests
 
-Golden-file tests for generated `.m3u8`.
+Use golden files for:
+
+- ordinary playlist;
+- missing tracks;
+- duplicate occurrences;
+- Liked Songs;
+- rename;
+- duplicate playlist names;
+- playlist deletion.
 
 ## Completion gate
 
-An ordinary desktop music player must successfully open generated fixture playlists.
+An ordinary desktop music player can open fixture-generated playlists and resolve their referenced managed audio files.
+
+At this point Offbeat should be useful as a desktop-only product. Use it before expanding scope if possible.
 
 ---
 
-# 12. Milestone 8 — Persistent Acquisition Work Queue
+# 9. Milestone 8 — One-Device Android Manual Sync
 
 ## Timebox
 
-**3–4 days**
+**5–7 engineering days**
 
-## Specific objective
+## Objective
 
-Build acquisition orchestration independently of real yt-dlp behavior.
+Manually synchronize the current playable Offbeat library to one Android phone over the LAN.
 
 ## Deliverables
 
-SQLite-backed jobs with states equivalent to:
+Before building UI complexity, define the smallest authenticated current-state LAN protocol needed by one device.
 
-```text
-pending
-running
-retry_wait
-review_required
-unresolved
-failed
-complete
-```
+Daemon provides a current manifest containing only metadata needed to compare/synchronize the current playable files and playlists.
 
-Implement:
+Android app provides:
 
-* bounded concurrency;
-* daemon restart recovery;
-* temporary failure retry;
-* capped exponential backoff;
-* permanent failure handling.
+- manual daemon address/configuration;
+- the minimal authentication flow selected by the M8 spec;
+- a **Sync now** action;
+- Offbeat-owned local storage;
+- current-state file comparison;
+- download of missing/replacement audio;
+- safe removal of obsolete files inside the Android Offbeat root;
+- playlist replacement after required files are available;
+- enough local state to make a later manual sync efficient.
 
-Use a fake downloader first.
+A failed transfer may restart that file from byte zero.
+
+The LAN API must not be anonymous or Internet-facing by default.
 
 ## Tests
 
-Mandatory concurrency/integration tests:
+Use a Go/fake client for protocol tests and Android tests for local storage behavior. A physical-device smoke test is the final gate.
 
-* daemon killed while jobs running;
-* work survives restart;
-* configured concurrency never exceeded;
-* temporary failures retry;
-* permanent failures do not retry forever.
+Test at minimum:
+
+- authentication rejection/success;
+- no-op current-state sync;
+- new audio file;
+- removed audio file;
+- changed playlist;
+- interrupted file transfer retries cleanly later;
+- failed sync does not destroy previously usable completed content;
+- operations stay inside the Offbeat Android root.
+
+## Out of scope
+
+- mDNS/DNS-SD;
+- automatic background sync;
+- resumable/range transfer;
+- arbitrary historical revision jumps;
+- multiple-device management UI;
+- per-device transcoding;
+- Spotify integration on Android.
 
 ## Completion gate
 
-Fake acquisition pipeline can process a large deterministic fixture workload across daemon restarts without lost work.
+On one physical Android device:
+
+```text
+manual connect/authenticate
+-> Sync now
+-> current playable Offbeat audio + playlists present
+-> ordinary Android player can play them offline
+```
 
 ---
 
-# 13. Milestone 9 — yt-dlp and FFmpeg Integration
+# 10. Milestone 9 — Setup, Packaging, and Reliability
 
 ## Timebox
 
-**4–6 days**
+**4–7 engineering days**
 
-## Specific objective
+## Objective
 
-Add the real v1 media backend for authorized source URLs.
+Make the completed lean v1 reproducible and harden the failure cases discovered while using it.
 
 ## Deliverables
 
-Create internal interface:
+Provide clear supported-Linux installation documentation and focused helpers where they remove real friction.
 
-```go
-type Downloader interface {
-    Probe(...)
-    Download(...)
-}
-```
+The normal desktop deployment should support a `systemd --user` service.
 
-Implement:
+Setup work may automate Offbeat-owned concerns such as:
 
-```text
-yt-dlp backend
-```
+- creating config/data/music directories;
+- generating/provisioning the Adapter credential;
+- installing a user service file;
+- producing/configuring the Spicetify extension artifact;
+- checking for external prerequisites.
 
-Separate media processing:
+It does not need to install Spotify, Spicetify, `yt-dlp`, or FFmpeg automatically, and a single all-encompassing `offbeat setup` command is not required if documented focused steps are simpler and reliable.
 
-```text
-download
-→ inspect
-→ normalize if necessary
-→ tag
-→ artwork
-→ atomic move into managed library
-```
+Run an end-to-end reliability pass across:
 
-Require:
+- daemon restart;
+- Spotify unavailable;
+- candidate collection failure;
+- SQLite commit failure;
+- acquisition failure/restart;
+- missing managed files;
+- playlist regeneration;
+- interrupted Android manual sync;
+- clean reinstall/reconfiguration path.
 
-```text
-yt-dlp
-ffmpeg
-```
-
-from configurable paths / `$PATH`.
-
-## Rules
-
-* quality over disk usage;
-* do not transcode without a concrete reason;
-* preserve acceptable FLAC/MP3/AAC/M4A/Opus;
-* failures do not block unrelated jobs.
-
-## Tests
-
-Do not make CI depend on copyrighted external media.
-
-Use local/test servers and synthetic media wherever possible.
-
-Integration tests may exercise binaries using controlled test fixtures.
+Remove obsolete configuration fields/docs introduced only for deferred architecture when doing so is safe and clearly scoped.
 
 ## Completion gate
 
-Given an authorized test source URL, the daemon can produce a valid managed asset and persist its mapping.
+Starting from a clean supported Linux user environment with external prerequisites installed, the documented process reaches:
+
+```text
+Spotify candidate
+-> persisted desired state
+-> managed audio from authorized source workflow
+-> desktop M3U8
+-> one-phone manual sync
+-> offline playback through ordinary players
+```
+
+without source-code editing.
 
 ---
 
-# 14. Milestone 10 — Auto-Acquisition and Bootstrap
-
-## Timebox
-
-**2–3 days**
-
-## Specific objective
-
-Connect Spotify reconciliation to acquisition.
-
-## Deliverables
-
-After snapshot:
-
-```text
-desired
-→ match
-→ unresolved/missing
-→ acquisition queue
-```
-
-Implement:
-
-```toml
-auto_acquire = true|false
-```
-
-Implement first-snapshot state:
-
-```text
-BOOTSTRAP_PENDING
-```
-
-Add explicit CLI approval.
-
-## Tests
-
-Prove:
-
-* first snapshot never automatically launches mass acquisition;
-* approval starts eligible work;
-* later Spotify additions auto-queue;
-* auto-acquire false never blocks metadata sync.
-
-## Completion gate
-
-The desktop-only user flow from Spotify startup through managed local library works without Android.
-
----
-
-# 15. Milestone 11 — Deletion and Integrity Semantics
-
-## Timebox
-
-**3–4 days**
-
-## Specific objective
-
-Make destructive behavior safe and deterministic.
-
-## Deliverables
-
-Implement:
-
-* immediate desired-state removal;
-* asset reference counting;
-* physical deletion only at zero references;
-* deferral while Offbeat operation actively uses file;
-* lightweight existence checks;
-* automatic reacquisition when appropriate;
-* `offbeat verify`.
-
-## Tests
-
-Destructive tests are mandatory:
-
-```text
-remove from one playlist only
-remove from all references
-shared asset still referenced
-file deleted manually
-file corrupt
-delete while acquisition/sync handle active
-```
-
-## Completion gate
-
-No test may demonstrate deletion of an asset with a live desired reference.
-
----
-
-# 16. Milestone 12 — Desktop Setup and systemd Integration
-
-## Timebox
-
-**2–3 days**
-
-## Specific objective
-
-Make desktop installation reproducible.
-
-## Deliverables
-
-Implement:
-
-```bash
-offbeat setup
-```
-
-It must:
-
-* create directories;
-* initialize config;
-* initialize DB;
-* generate secrets;
-* generate TLS material;
-* install/update user systemd unit;
-* install/link Spicetify extension;
-* verify external prerequisites;
-* print actionable errors.
-
-## Acceptance test
-
-Starting from a clean supported Linux user environment with prerequisites installed:
-
-```bash
-offbeat setup
-systemctl --user start offbeat
-```
-
-must result in a working daemon.
-
-## Completion gate
-
-A fresh installation can reach completed Spotify snapshot without manual source-code editing.
-
----
-
-# 17. Milestone 13 — Device Model and LAN API
-
-## Timebox
-
-**4–5 days**
-
-## Specific objective
-
-Implement Android-facing protocol before building Android UI.
-
-## Deliverables
-
-Daemon:
-
-* HTTPS server;
-* generated certificate;
-* mDNS/DNS-SD advertisement;
-* manual-address-compatible endpoint;
-* pairing session;
-* six-digit code;
-* per-device credential;
-* certificate identity;
-* device persistence.
-
-CLI:
-
-```bash
-offbeat pair
-offbeat devices
-```
-
-## Tests
-
-Use Go HTTP clients as fake Android devices.
-
-Test:
-
-* successful pairing;
-* wrong pairing code;
-* expired pairing flow;
-* invalid credential;
-* certificate identity;
-* multiple modeled devices;
-* unpaired access rejection.
-
-## Completion gate
-
-A fake client can securely pair and retrieve authenticated metadata over LAN HTTPS.
-
----
-
-# 18. Milestone 14 — Revision Manifest Protocol
-
-## Timebox
-
-**3–4 days**
-
-## Specific objective
-
-Define sync semantics independently of Android implementation.
-
-## Deliverables
-
-Manifest must provide:
-
-```text
-revision
-assets[]
-asset hashes
-sizes
-remote paths/IDs
-playlists[]
-playlist hashes
-```
-
-Implement endpoint allowing client current-state description and reconciliation against latest state.
-
-Client can jump:
-
-```text
-revision 3 → revision 57
-```
-
-directly.
-
-## Tests
-
-Test:
-
-* no-op sync;
-* new files;
-* deleted files;
-* renamed playlist;
-* changed playlist;
-* stale client;
-* shared asset;
-* missing desktop asset.
-
-## Completion gate
-
-A fake client can derive an exact latest-state reconciliation without replaying historical revisions.
-
----
-
-# 19. Milestone 15 — Resumable File Transfer
-
-## Timebox
-
-**3–4 days**
-
-## Specific objective
-
-Make media transfer reliable.
-
-## Deliverables
-
-Implement:
-
-```text
-HTTP Range
-SHA-256
-immutable asset download
-```
-
-Requirements:
-
-* interrupted transfers resume;
-* invalid ranges handled correctly;
-* hashes exposed through manifest;
-* stale asset request fails safely when latest state changed.
-
-## Tests
-
-Automated transfer interruption/resumption tests.
-
-Corrupt downloaded bytes deliberately and verify rejection.
-
-## Completion gate
-
-A fake Android client can download and verify a multi-megabyte asset across deliberate connection interruption.
-
----
-
-# 20. Milestone 16 — Minimal Android Pairing App
-
-## Timebox
-
-**4–6 days**
-
-## Specific objective
-
-Create the Android application shell and secure pairing.
-
-## Deliverables
-
-Native Kotlin + Compose.
-
-Screens:
-
-```text
-Pair PC
-Home
-Settings
-```
-
-Implement:
-
-* mDNS discovery;
-* manual host fallback;
-* pairing code submission;
-* certificate pinning;
-* secure credential storage;
-* paired daemon status.
-
-No media synchronization yet.
-
-## Tests
-
-Unit tests for protocol/state logic.
-
-Android instrumentation test for pairing flow where practical.
-
-## Completion gate
-
-A physical Android device can discover/pair with Offbeat and persist its identity across app restart.
-
----
-
-# 21. Milestone 17 — Android Storage and Manual Sync
-
-## Timebox
-
-**5–7 days**
-
-## Specific objective
-
-Complete one end-to-end manual phone synchronization.
-
-## Deliverables
-
-Android app must:
-
-1. fetch latest manifest;
-2. calculate required bytes;
-3. perform storage preflight;
-4. stop without mutation if insufficient;
-5. download required files;
-6. resume transfers;
-7. verify SHA-256;
-8. publish into `Music/Offbeat/`;
-9. remove obsolete managed files;
-10. write playlists last;
-11. save committed revision.
-
-Use MediaStore/shared media APIs appropriately.
-
-## Tests
-
-Test:
-
-* first sync;
-* incremental sync;
-* deletion;
-* interruption;
-* hash mismatch;
-* insufficient storage;
-* stale revision.
-
-## Completion gate
-
-On a physical Android device:
-
-```text
-tap Sync now
-→ files appear under Music/Offbeat
-→ M3U8 playlists appear
-→ third-party player can play them offline
-```
-
----
-
-# 22. Milestone 18 — Android Automatic Sync
-
-## Timebox
-
-**2–3 days**
-
-## Specific objective
-
-Add opportunistic automatic synchronization.
-
-## Deliverables
-
-Use WorkManager.
-
-Conditions:
-
-* auto-sync enabled;
-* suitable network available;
-* daemon reachable/authenticated.
-
-Manual `Sync now` remains available.
-
-Automatic sync must not run overlapping copies of itself.
-
-## Tests
-
-Test scheduling state transitions.
-
-## Completion gate
-
-After desktop revision changes, the Android device eventually reaches the latest state without manually opening Spotify or Offbeat Android, subject to Android background scheduling behavior.
-
----
-
-# 23. Milestone 19 — End-to-End Reliability Pass
-
-## Timebox
-
-**5–7 days**
-
-## Specific objective
-
-Validate v1 against realistic failure scenarios.
-
-## Required scenarios
-
-### Desktop
-
-* kill daemon during acquisition;
-* restart daemon;
-* close Spotify;
-* restart Spotify;
-* deliberately fail snapshot page;
-* remove playlist;
-* rename playlist;
-* remove shared asset reference;
-* manually delete managed file.
-
-### Android
-
-* disconnect Wi-Fi during download;
-* reconnect;
-* phone several revisions behind;
-* insufficient storage;
-* corrupt partial transfer;
-* daemon restart during sync.
-
-## Measurable goal
-
-Every scenario must either:
-
-```text
-recover automatically
-```
-
-or:
-
-```text
-leave system in a safe diagnosable state
-```
-
-No scenario may silently corrupt desired state or delete still-required assets.
-
-## Completion gate
-
-All v1 failure-path integration tests pass.
-
----
-
-# 24. Milestone 20 — Documentation and Release Candidate
-
-## Timebox
-
-**3–4 days**
-
-## Specific objective
-
-Make v1 usable without implementation knowledge.
-
-## Deliverables
-
-Documentation:
-
-```text
-README
-architecture overview
-installation
-Spicetify setup
-first bootstrap
-CLI reference
-Android pairing
-Android sync
-configuration
-failure recovery
-known limitations
-security model
-```
-
-Create a release checklist.
-
-## Completion gate
-
-Perform a clean install from documentation alone.
-
-No undocumented manual DB/file modification should be necessary.
-
----
-
-# 25. Suggested Overall Schedule
-
-For one developer/agent working sequentially:
-
-```text
-Week 1
-M0–M2
-repo, daemon, IPC, Spicetify connection
-
-Week 2
-M3–M4
-real Spotify snapshots + reconciliation
-
-Week 3
-M5–M7
-assets, matching, review, playlists
-
-Week 4
-M8–M10
-persistent acquisition + yt-dlp + bootstrap
-
-Week 5
-M11–M14
-deletion safety, setup, pairing, manifests
-
-Week 6
-M15–M17
-resumable transfer + Android manual sync
-
-Week 7
-M18–M20
-auto sync, reliability, documentation
-```
-
-This is a target sequence, not a requirement to ship exactly in seven weeks.
-
-If using coding agents, milestone completion—not elapsed days—should control progress.
-
----
-
-# 26. Agent Execution Rules
-
-GitHub issues are the unit of executable work. Use `/to-spec` when a change still needs a focused specification, `/to-tickets` to decompose an approved milestone or plan into tracer-bullet tickets, and `/triage` to move each issue toward `ready-for-agent`, `ready-for-human`, or `wontfix`.
-
-Every coding-agent task should be limited to one agent-ready issue. A milestone may map to one issue only when it already forms a small vertical slice; otherwise, split it into dependency-linked issues whose acceptance criteria can be verified independently.
-
-Do not prompt:
-
-```text
-Implement Offbeat.
-```
-
-Prefer:
-
-```text
-Implement the agent-ready GitHub issue for M4 Spotify snapshot persistence and reconciliation.
-
-Constraints:
-- daemon exclusively owns SQLite;
-- use existing migrations framework;
-- commit valid snapshots in one SQLite transaction;
-- failed candidate snapshots must not modify committed state;
-- preserve playlist ordering and duplicates;
-- do not implement acquisition.
-
-Before editing:
-1. read the issue and its comments;
-2. inspect `CONTEXT.md` and relevant ADRs when present;
-3. inspect existing DB interfaces, migrations, tests, and adjacent packages.
-
-Completion:
-- implementation;
-- migrations;
-- unit tests;
-- integration tests;
-- go test ./... passes;
-- document any architecture decisions.
-```
-
----
-
-# 27. Required Agent Workflow
-
-For each agent-ready GitHub issue:
-
-### Step 0 — claim and verify
-
-Agent must:
-
-* fetch the issue and comments from GitHub;
-* confirm that blocking issues are closed;
-* claim the issue before making the first repository change;
-* treat the issue's scope and acceptance criteria as the implementation contract.
-
-### Step 1 — inspect
-
-Agent must inspect:
-
-* relevant architecture docs;
-* current interfaces;
-* migrations;
-* tests;
-* adjacent packages.
-
-### Step 2 — plan when needed
-
-For non-trivial work, the agent writes a short implementation plan containing:
-
-```text
-files/modules affected
-interfaces added/changed
-schema changes
-tests to add
-risks
-```
-
-### Step 3 — implement
-
-Agent makes the smallest coherent implementation satisfying the issue's requirements.
-
-### Step 4 — test
-
-Agent must run all relevant automated tests.
-
-For Go work:
-
-```bash
-go test ./...
-go vet ./...
-```
-
-For Android work, use the repository's Gradle test commands.
-
-### Step 5 — self-review
-
-Agent verifies:
-
-* no scope creep;
-* no duplicate domain concepts;
-* errors handled;
-* context cancellation respected;
-* destructive operations tested;
-* architecture boundaries preserved.
-
-### Step 6 — completion report
-
-Agent posts or reports:
-
-```text
-what changed
-tests run
-acceptance criteria satisfied
-known limitations
-follow-up work intentionally deferred
-```
-
-Record newly discovered work as a separate issue rather than silently expanding scope. Close the active issue only after its acceptance criteria and verification steps pass.
-
----
-
-# 28. Dependency Graph
-
-```text
-M0 Repository
- |
- v
-M1 Daemon/CLI IPC
- |
- +------> M2 Spicetify transport
- |            |
- |            v
- |       M3 Spotify collection
- |            |
- |            v
- |       M4 Reconciliation
- |            |
- |      +-----+------+
- |      |            |
- |      v            v
- |     M5           M6
- |   Assets       Matching
- |      |            |
- |      +-----+------+
- |            |
- |            v
- |           M7
- |       Playlists
- |            |
- |            v
- |           M8
- |     Acquisition queue
- |            |
- |            v
- |           M9
- |      yt-dlp/media
- |            |
- |            v
- |          M10
- |       Auto acquire
- |            |
- |            v
- |          M11
- |      deletion safety
- |            |
- |            v
- |          M12
- |         setup
- |
- +--------------------> M13 Pairing/LAN
-                          |
-                          v
-                        M14 Manifest
-                          |
-                          v
-                        M15 Transfer
-                          |
-                          v
-                        M16 Android pairing
-                          |
-                          v
-                        M17 Manual sync
-                          |
-                          v
-                        M18 Auto sync
-                          |
-                          v
-                        M19 Reliability
-                          |
-                          v
-                        M20 Release
-```
-
----
-
-# 29. Project-Wide Engineering Constraints
-
-## Go
-
-Use `context.Context` for:
-
-* daemon lifecycle;
-* WebSocket/session lifetime;
-* database operations;
-* acquisition jobs;
-* external processes;
-* media processing;
-* sync requests.
-
-Long-running subprocesses must be cancellable.
-
-Do not store request-scoped contexts permanently inside domain objects.
-
----
-
-## Database
-
-All state mutations go through daemon-owned repositories/services.
-
-Transactions must protect:
-
-* snapshot commit;
-* revision generation;
-* reference-count-affecting changes;
-* acquisition state transitions where atomicity matters.
-
----
-
-## Filesystem
-
-Never expose partially written final assets.
-
-Required pattern:
-
-```text
-temporary path
-→ process
-→ fsync/close where appropriate
-→ atomic rename
-→ DB state commit in safe order
-```
-
-Destructive changes must be idempotent.
-
----
-
-## Protocols
-
-Version both:
-
-```text
-Spicetify ↔ daemon protocol
-Android ↔ daemon protocol
-```
-
-The initial version may simply be:
-
-```text
-v1
-```
-
-but protocol-version negotiation/failure must be explicit.
-
----
-
-# 30. SMART v1 Product Goal
-
-## Specific
-
-Deliver a Linux/Android system that mirrors Spotify playlists/Liked Songs into an offline managed library and synchronizes playable files to Android.
-
-## Measurable
-
-v1 succeeds when the complete 25-step acceptance scenario from the PRD works and all required reliability tests pass.
-
-## Achievable
-
-Scope excludes:
-
-* music-player development;
-* desktop GUI;
-* cross-platform desktop;
-* cloud sync;
-* bidirectional Spotify editing;
-* per-device media transcoding;
-* advanced acoustic matching.
-
-## Relevant
-
-Every implemented component directly serves the user's requirement:
-
-> Spotify-organized music should remain playable offline on Linux and Android.
-
-## Time-bound
-
-Target a **7-week sequential implementation window**, with progress gated by the milestone acceptance criteria rather than calendar pressure.
-
-A milestone that fails its completion gate does not unlock dependent milestones.
-
----
-
-# 31. Final Release Gate
-
-Offbeat v1 is releasable only when all of the following are true:
-
-```text
-[ ] clean Linux setup succeeds
-[ ] systemd daemon starts automatically
-[ ] real Spotify snapshot succeeds
-[ ] partial snapshot cannot corrupt state
-[ ] Spotify ordering is preserved
-[ ] missing tracks are visible
-[ ] review queue works
-[ ] acquisition survives restart
-[ ] managed files are tagged/generated correctly
-[ ] playlist rename/delete works
-[ ] shared assets are not prematurely deleted
-[ ] first bootstrap requires approval
-[ ] subsequent auto-acquisition works
-[ ] Android pairing works
-[ ] HTTPS credentials/certificate trust work
-[ ] Android storage preflight works
-[ ] resumable download works
-[ ] SHA-256 verification works
-[ ] M3U8 is committed last
-[ ] third-party Android player can play synced library
-[ ] Wi-Fi interruption recovers safely
-[ ] phone can jump directly to latest revision
-[ ] automated test suite passes
-[ ] clean-install documentation has been validated
-```
-
-Only after this checklist passes should additional v2 features be considered.
+# 11. Estimated remaining effort after M3
+
+Planning timeboxes:
+
+| Milestone | Timebox |
+|---|---:|
+| M4 — current Spotify state | 2–3 days |
+| M5 — managed tracks/missing | 2–3 days |
+| M6 — minimal acquisition | 4–6 days |
+| M7 — M3U8 | 1–2 days |
+| M8 — Android manual sync | 5–7 days |
+| M9 — setup/reliability | 4–7 days |
+| **Total** | **18–28 engineering days** |
+
+These are scope-control estimates, not delivery promises. If a milestone exceeds its timebox, first check whether deferred architecture has been pulled back into scope.
+
+## 12. Deferred backlog after lean v1
+
+Do not schedule these automatically. Reconsider them from real usage:
+
+- historical revision/snapshot browsing;
+- richer sync history;
+- cross-track asset deduplication;
+- metadata matching and review;
+- source-resolver plugin architecture;
+- sophisticated automatic retry/backoff;
+- automatic physical garbage collection;
+- deep verify/repair tooling;
+- LAN discovery;
+- richer pairing/device management;
+- resumable transfers;
+- Android background sync;
+- multi-device support;
+- end-to-end setup automation.
