@@ -101,6 +101,10 @@ Spicetify configuration, and `offbeat setup`.
 The adapter requests every page with explicit `offset` and `limit`, verifies a
 non-negative stable `totalLength`, rejects pages that overrun the remaining
 total, rejects an empty page before completion, and requires forward progress.
+Spotify Desktop can report `totalLength: 0` alongside nonempty Liked Songs
+items. The adapter treats that combination as an unavailable-count sentinel,
+requires every subsequent page to retain that sentinel, and completes on a
+short page (or an empty page after a full page).
 When a Platform response exposes an `offset`, the adapter also requires it to
 match the requested offset, which rejects an API that repeats an earlier page.
 Some supported Platform builds expose only `items` and `totalLength`; without a

@@ -65,6 +65,10 @@ function supportedTrack(uri, name) {
   return { type: "track", uri: uri, name: name, duration_ms: 1000, artists: [{ uri: "spotify:artist:one", name: "Artist" }], album: { uri: "spotify:album:one", name: "Album" } };
 }
 
+function desktopTrack(uri, name) {
+  return { type: "track", uri: uri, name: name, duration: { milliseconds: 1000 }, artists: [{ uri: "spotify:artist:one", name: "Artist" }], album: { uri: "spotify:album:one", name: "Album" } };
+}
+
 test("sends a normalized candidate only for correlated snapshot requests after acceptance", async function () {
   var peer = createPeer();
   start(peer);
@@ -102,6 +106,57 @@ test("collects nested playlists and paginated liked songs without dropping dupli
   assert.equal(snapshot.playlists[0].entries[1].track.uri, "spotify:track:duplicate");
   assert.deepEqual(snapshot.playlists[0].entries[2], { position: 2, kind: "unsupported" });
   assert.deepEqual(snapshot.liked_songs.entries[1], { position: 1, kind: "unsupported", source_uri: "spotify:track:unplayable" });
+});
+
+test("normalizes Desktop duration objects and completes Liked Songs when its count is unavailable", async function () {
+  var snapshot = await require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: { getTracks: async function (request) {
+      assert.deepEqual(request, { offset: 0, limit: 100 });
+      return { items: Array.from({ length: 65 }, function (_, index) { return desktopTrack("spotify:track:" + index, "Track " + index); }), totalLength: 0 };
+    } }
+  });
+  assert.equal(snapshot.liked_songs.entries.length, 65);
+  assert.deepEqual(snapshot.liked_songs.entries[0], {
+    position: 0,
+    kind: "supported",
+    track: {
+      uri: "spotify:track:0",
+      name: "Track 0",
+      artists: [{ uri: "spotify:artist:one", name: "Artist" }],
+      album: { uri: "spotify:album:one", name: "Album" },
+      duration_ms: 1000
+    }
+  });
+});
+
+test("paginates an unavailable Liked Songs count by page length and rejects a later count", async function () {
+  var calls = [];
+  var snapshot = await require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: { getTracks: async function (request) {
+      calls.push(request.offset);
+      return {
+        items: Array.from({ length: request.offset === 0 ? 100 : 1 }, function (_, index) { return desktopTrack("spotify:track:" + (request.offset + index), "Track " + (request.offset + index)); }),
+        totalLength: 0
+      };
+    } }
+  });
+  assert.deepEqual(calls, [0, 100]);
+  assert.equal(snapshot.liked_songs.entries.length, 101);
+
+  await assert.rejects(require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: { getTracks: async function (request) {
+      return {
+        items: Array.from({ length: request.offset === 0 ? 100 : 1 }, function (_, index) { return desktopTrack("spotify:track:" + (request.offset + index), "Track " + (request.offset + index)); }),
+        totalLength: request.offset === 0 ? 0 : 101
+      };
+    } }
+  }), /inconsistent pagination/);
 });
 
 test("rejects malformed pages and unavailable Platform APIs", async function () {
