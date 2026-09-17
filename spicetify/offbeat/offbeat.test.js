@@ -133,12 +133,32 @@ test("rejects malformed rootlists, items, and page counters", async function () 
 });
 
 test("rejects pages whose reported offset does not match the requested offset", async function () {
-  var repeatedPage = { offset: 0, items: Array.from({ length: 100 }, function (_, index) { return supportedTrack("spotify:track:" + index, "Track " + index); }), totalLength: 200 };
   await assert.rejects(require("./offbeat.js").collectSnapshot({
     RootlistAPI: { getContents: async function () { return { items: [] }; } },
     PlaylistAPI: emptyPlatform().PlaylistAPI,
-    LibraryAPI: { getTracks: async function () { return repeatedPage; } }
-  }), /inconsistent pagination/);
+    LibraryAPI: { getTracks: async function (request) {
+      return {
+        offset: request.offset === 0 ? 0 : 50,
+        items: Array.from({ length: 100 }, function (_, index) { return supportedTrack("spotify:track:" + (request.offset + index), "Track " + (request.offset + index)); }),
+        totalLength: 200
+      };
+    } }
+  }), /inconsistent pagination: requested offset 100, received 50/);
+});
+
+test("treats Spotify's zero page offset as unavailable pagination metadata", async function () {
+  var snapshot = await require("./offbeat.js").collectSnapshot({
+    RootlistAPI: { getContents: async function () { return { items: [] }; } },
+    PlaylistAPI: emptyPlatform().PlaylistAPI,
+    LibraryAPI: { getTracks: async function (request) {
+      return {
+        offset: 0,
+        items: Array.from({ length: 100 }, function (_, index) { return supportedTrack("spotify:track:" + (request.offset + index), "Track " + (request.offset + index)); }),
+        totalLength: 200
+      };
+    } }
+  });
+  assert.equal(snapshot.liked_songs.entries.length, 200);
 });
 
 test("sends one bounded collection error instead of a partial candidate", async function () {

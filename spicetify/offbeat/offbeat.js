@@ -28,8 +28,8 @@
     }
     // Some supported Platform builds report their response offset. When they
     // do, it must match the page requested; other builds expose no position.
-    if (Object.prototype.hasOwnProperty.call(response, "offset") && (!Number.isSafeInteger(response.offset) || response.offset !== offset)) {
-      throw collectionError(operation, offset, "inconsistent pagination");
+    if (Object.prototype.hasOwnProperty.call(response, "offset") && (!Number.isSafeInteger(response.offset) || (response.offset !== 0 && response.offset !== offset))) {
+      throw collectionError(operation, offset, "inconsistent pagination: requested offset " + offset + ", received " + String(response.offset));
     }
     return response;
   }
