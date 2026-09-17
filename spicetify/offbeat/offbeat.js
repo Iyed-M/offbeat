@@ -22,12 +22,13 @@
     return typeof value === "string" && value !== "";
   }
 
-  function page(response, operation, offset) {
+  function page(response, operation, offset, onZeroPageOffset) {
     if (!object(response) || !Array.isArray(response.items) || !Number.isSafeInteger(response.totalLength) || response.totalLength < 0) {
       throw collectionError(operation, offset);
     }
-    // Some supported Platform builds report their response offset. When they
-    // do, it must match the page requested; other builds expose no position.
+    // Spotify Desktop reports zero for every page on some builds. Treat that
+    // value as unavailable position metadata, not a contradictory page index.
+    if (Object.prototype.hasOwnProperty.call(response, "offset") && response.offset === 0 && offset > 0 && onZeroPageOffset) onZeroPageOffset(operation, offset);
     if (Object.prototype.hasOwnProperty.call(response, "offset") && (!Number.isSafeInteger(response.offset) || (response.offset !== 0 && response.offset !== offset))) {
       throw collectionError(operation, offset, "inconsistent pagination: requested offset " + offset + ", received " + String(response.offset));
     }
@@ -63,14 +64,14 @@
     };
   }
 
-  async function fetchEntries(fetchPage, operation) {
+  async function fetchEntries(fetchPage, operation, onZeroPageOffset) {
     var entries = [];
     var offset = 0;
     var total = null;
     while (total === null || offset < total) {
       var response;
       try {
-        response = page(await fetchPage(offset, PAGE_LIMIT), operation, offset);
+        response = page(await fetchPage(offset, PAGE_LIMIT), operation, offset, onZeroPageOffset);
       } catch (error) {
         if (error && error.operation) throw error;
         throw collectionError(operation, offset, "request failed");
@@ -87,7 +88,7 @@
     return entries;
   }
 
-  async function collectSnapshot(platform) {
+  async function collectSnapshot(platform, onZeroPageOffset) {
     if (!object(platform) || !object(platform.RootlistAPI) || typeof platform.RootlistAPI.getContents !== "function" || !object(platform.PlaylistAPI) || typeof platform.PlaylistAPI.getContents !== "function" || !object(platform.LibraryAPI) || typeof platform.LibraryAPI.getTracks !== "function") {
       throw collectionError("platform", null, "required Spotify Platform API is unavailable");
     }
@@ -119,12 +120,12 @@
       var playlist = playlists[playlistIndex];
       playlist.entries = await fetchEntries(function (uri) {
         return function (offset, limit) { return platform.PlaylistAPI.getContents(uri, { offset: offset, limit: limit }); };
-      }(playlist.uri), "playlist");
+      }(playlist.uri), "playlist", onZeroPageOffset);
     }
     return {
       kind: "candidate",
       playlists: playlists,
-      liked_songs: { entries: await fetchEntries(function (offset, limit) { return platform.LibraryAPI.getTracks({ offset: offset, limit: limit }); }, "liked_songs") }
+      liked_songs: { entries: await fetchEntries(function (offset, limit) { return platform.LibraryAPI.getTracks({ offset: offset, limit: limit }); }, "liked_songs", onZeroPageOffset) }
     };
   }
 
@@ -151,7 +152,9 @@
     function rejectPermanently(code) { permanentlyRejected = true; log("error", "Offbeat adapter rejected by daemon: " + code + ". Reconfigure or reload the extension before retrying."); if (socket) socket.close(); }
     function protocolViolation(message) { log("warn", message); if (socket) socket.close(); }
     function respondToSnapshot(requestID, session) {
-      collectSnapshot(platform).then(function (snapshot) {
+      collectSnapshot(platform, function (operation, offset) {
+        log("warn", "Spotify returned offset 0 for " + operation + " page requested at offset " + offset + "; treating the response offset as unavailable pagination metadata.");
+      }).then(function (snapshot) {
         if (authenticated && socket === session) {
           var entries = 0;
           var unsupported = 0;

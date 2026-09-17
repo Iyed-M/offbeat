@@ -147,6 +147,7 @@ test("rejects pages whose reported offset does not match the requested offset", 
 });
 
 test("treats Spotify's zero page offset as unavailable pagination metadata", async function () {
+  var warnings = [];
   var snapshot = await require("./offbeat.js").collectSnapshot({
     RootlistAPI: { getContents: async function () { return { items: [] }; } },
     PlaylistAPI: emptyPlatform().PlaylistAPI,
@@ -157,8 +158,9 @@ test("treats Spotify's zero page offset as unavailable pagination metadata", asy
         totalLength: 200
       };
     } }
-  });
+  }, function (operation, offset) { warnings.push({ operation: operation, offset: offset }); });
   assert.equal(snapshot.liked_songs.entries.length, 200);
+  assert.deepEqual(warnings, [{ operation: "liked_songs", offset: 100 }]);
 });
 
 test("sends one bounded collection error instead of a partial candidate", async function () {
