@@ -28,6 +28,7 @@ func TestParseCandidateSnapshotMaterializesNormalizedCandidate(t *testing.T) {
 
 func TestParseCandidateSnapshotRejectsInvalidAndConflictingTracks(t *testing.T) {
 	for _, snapshot := range []string{
+		`{"kind":"candidate","kind":"candidate","playlists":[],"liked_songs":{"entries":[]}}`,
 		`{"kind":"candidate","playlists":[],"liked_songs":{"entries":[{"position":1,"kind":"unsupported"}]}}`,
 		`{"kind":"candidate","playlists":[],"liked_songs":{"entries":[{"position":0,"kind":"supported","track":{"uri":"spotify:track:one","name":"One","artists":[],"album":{"uri":"spotify:album:one","name":"Album"},"duration_ms":1}}]}}`,
 		`{"kind":"candidate","playlists":[],"liked_songs":{"entries":[{"position":0,"kind":"supported","track":{"uri":"spotify:track:one","name":"One","artists":[{"uri":"spotify:artist:one","name":"Artist"}],"album":{"uri":"spotify:album:one","name":"Album"},"duration_ms":1}},{"position":1,"kind":"supported","track":{"uri":"spotify:track:one","name":"Renamed","artists":[{"uri":"spotify:artist:one","name":"Artist"}],"album":{"uri":"spotify:album:one","name":"Album"},"duration_ms":1}}]}}`,

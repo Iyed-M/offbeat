@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -485,8 +487,8 @@ func parseCandidateSnapshot(data json.RawMessage) (desired.Candidate, error) {
 func materializeEntries(entries []json.RawMessage, tracks map[string]desired.Track) ([]desired.CandidateEntry, error) {
 	result := make([]desired.CandidateEntry, 0, len(entries))
 	for position, raw := range entries {
-		var entry map[string]json.RawMessage
-		if json.Unmarshal(raw, &entry) != nil {
+		entry, ok := decodeObject(raw)
+		if !ok {
 			return nil, errors.New("invalid entry")
 		}
 		var actualPosition int
@@ -600,8 +602,8 @@ func parseCollectionError(data json.RawMessage) (error, bool) {
 }
 
 func decodeExactObject(data json.RawMessage, target any, names ...string) bool {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(data, &fields) != nil || len(fields) != len(names) {
+	fields, ok := decodeObject(data)
+	if !ok || len(fields) != len(names) {
 		return false
 	}
 	for _, name := range names {
@@ -610,6 +612,46 @@ func decodeExactObject(data json.RawMessage, target any, names ...string) bool {
 		}
 	}
 	return json.Unmarshal(data, target) == nil
+}
+
+// decodeObject rejects duplicate member names, which encoding/json's map
+// decoding would otherwise silently overwrite.
+func decodeObject(data json.RawMessage) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, false
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		if _, exists := fields[name]; exists {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		fields[name] = value
+	}
+	token, err = decoder.Token()
+	if err != nil {
+		return nil, false
+	}
+	delimiter, ok = token.(json.Delim)
+	if !ok || delimiter != '}' {
+		return nil, false
+	}
+	var extra any
+	return fields, decoder.Decode(&extra) == io.EOF
 }
 
 func (d *Daemon) completePendingSnapshot(pending *pendingSnapshot, err error) {
