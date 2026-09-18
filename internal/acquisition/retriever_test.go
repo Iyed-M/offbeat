@@ -3,6 +3,7 @@ package acquisition
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -105,13 +106,30 @@ func TestRetrieveCancellationKillsProcessGroup(t *testing.T) {
 	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil || pid <= 0 {
 		t.Fatalf("child PID = %q, %v", data, err)
 	}
-	if err := syscall.Kill(pid, 0); err != nil && err != syscall.ESRCH {
-		t.Fatalf("check child process: %v", err)
-	}
-	// A killed orphan can remain as a zombie briefly until init reaps it; it is
-	// no longer executing and therefore proves the process group was stopped.
-	if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil && !strings.Contains(string(stat), ") Z ") {
-		t.Fatalf("child process %d remains running: %q", pid, stat)
+	waitForProcessStop(t, pid)
+}
+
+func waitForProcessStop(t *testing.T, pid int) {
+	t.Helper()
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	deadline := time.Now().Add(time.Second)
+	for {
+		stat, err := os.ReadFile(statPath)
+		if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("check child process %d: %v", pid, err)
+		}
+		// A killed orphan can remain dead or as a zombie briefly until init
+		// reaps it; neither state can execute further work.
+		if strings.Contains(string(stat), ") X ") || strings.Contains(string(stat), ") Z ") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child process %d remains running: %q", pid, stat)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
