@@ -60,6 +60,89 @@ func TestEncodeDecodeRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeAcquisitionRequests(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		check   func(t *testing.T, req ipc.Request)
+	}{
+		{
+			name:    "acquire",
+			payload: `{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3"}}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.Acquire == nil || req.Acquire.TrackURI != "spotify:track:one" || req.Acquire.SourceURL != "https://media.example.test/one.mp3" {
+					t.Fatalf("Acquire = %#v", req.Acquire)
+				}
+			},
+		},
+		{
+			name:    "status",
+			payload: `{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":42}}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionStatus == nil || req.AcquisitionStatus.ID != 42 {
+					t.Fatalf("AcquisitionStatus = %#v", req.AcquisitionStatus)
+				}
+			},
+		},
+		{
+			name:    "retry",
+			payload: `{"version":1,"command":"acquire.retry","acquisition_retry":{"acquisition_id":42}}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionRetry == nil || req.AcquisitionRetry.ID != 42 {
+					t.Fatalf("AcquisitionRetry = %#v", req.AcquisitionRetry)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req ipc.Request
+			if err := ipc.Decode([]byte(tt.payload), &req); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			tt.check(t, req)
+		})
+	}
+}
+
+func TestDecodeRejectsInvalidAcquisitionRequestShapes(t *testing.T) {
+	for _, payload := range []string{
+		`{"version":1,"command":"acquire"}`,
+		`{"version":1,"command":"acquire","acquire":null}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one"}}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:playlist:one","source_url":"https://media.example.test/one.mp3"}}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"search terms"}}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://user:password@media.example.test/one.mp3"}}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3#fragment"}}`,
+		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3","extra":true}}`,
+		`{"version":1,"command":"status","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3"}}`,
+		`{"version":1,"command":"acquire.status"}`,
+		`{"version":1,"command":"acquire.status","acquisition_status":null}`,
+		`{"version":1,"command":"acquire.status","acquisition_status":{}}`,
+		`{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":0}}`,
+		`{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":1,"extra":true}}`,
+		`{"version":1,"command":"acquire.retry","acquisition_status":{"acquisition_id":1}}`,
+		`{"version":1,"command":"acquire.retry"}`,
+		`{"version":1,"command":"acquire.retry","acquisition_retry":{"acquisition_id":-1}}`,
+	} {
+		var req ipc.Request
+		if err := ipc.Decode([]byte(payload), &req); err == nil {
+			t.Errorf("Decode(%s) succeeded", payload)
+		}
+	}
+}
+
+func TestValidateAcquisitionSource(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:8080/media.wav",
+		"https://media.example.test/path?download=1",
+	} {
+		if err := ipc.ValidateAcquisitionSource(raw); err != nil {
+			t.Errorf("ValidateAcquisitionSource(%q): %v", raw, err)
+		}
+	}
+}
+
 func TestEncodeProducesNoNewline(t *testing.T) {
 	req := ipc.Request{Version: 1, Command: "status"}
 	data, err := ipc.Encode(req)

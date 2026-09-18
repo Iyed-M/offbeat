@@ -56,10 +56,13 @@ type Request struct {
 	// versionSet records that strict JSON decoding validated the required
 	// version field. It lets the dispatcher distinguish an invalid request
 	// from an explicitly unsupported version.
-	versionSet bool
-	Version    int             `json:"version"`
-	Command    string          `json:"command"`
-	Missing    *MissingRequest `json:"missing,omitempty"`
+	versionSet        bool
+	Version           int                   `json:"version"`
+	Command           string                `json:"command"`
+	Missing           *MissingRequest       `json:"missing,omitempty"`
+	Acquire           *AcquireRequest       `json:"acquire,omitempty"`
+	AcquisitionStatus *AcquisitionIDRequest `json:"acquisition_status,omitempty"`
+	AcquisitionRetry  *AcquisitionIDRequest `json:"acquisition_retry,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -71,7 +74,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_status" && name != "acquisition_retry" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -110,11 +113,65 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		}
 		missing = &MissingRequest{AfterURI: page.AfterURI, StateRevision: *page.StateRevision}
 	}
+	var acquire *AcquireRequest
+	if raw, ok := fields["acquire"]; ok {
+		if parsedCommand != "acquire" || isJSONNull(raw) {
+			return errors.New("acquire arguments are only valid for acquire requests")
+		}
+		var parsed AcquireRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateAcquisitionTrackURI(parsed.TrackURI); err != nil {
+			return err
+		}
+		if err := ValidateAcquisitionSource(parsed.SourceURL); err != nil {
+			return err
+		}
+		acquire = &parsed
+	}
+	parseAcquisitionID := func(field, command string) (*AcquisitionIDRequest, error) {
+		raw, ok := fields[field]
+		if !ok {
+			return nil, nil
+		}
+		if parsedCommand != command || isJSONNull(raw) {
+			return nil, fmt.Errorf("%s arguments are only valid for %s requests", field, command)
+		}
+		var parsed AcquisitionIDRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return nil, err
+		}
+		if parsed.ID <= 0 {
+			return nil, errors.New("acquisition_id must be a positive integer")
+		}
+		return &parsed, nil
+	}
+	acquisitionStatus, err := parseAcquisitionID("acquisition_status", "acquire.status")
+	if err != nil {
+		return err
+	}
+	acquisitionRetry, err := parseAcquisitionID("acquisition_retry", "acquire.retry")
+	if err != nil {
+		return err
+	}
+	if parsedCommand == "acquire" && acquire == nil {
+		return errors.New("acquire request requires acquire arguments")
+	}
+	if parsedCommand == "acquire.status" && acquisitionStatus == nil {
+		return errors.New("acquire.status request requires acquisition_status arguments")
+	}
+	if parsedCommand == "acquire.retry" && acquisitionRetry == nil {
+		return errors.New("acquire.retry request requires acquisition_retry arguments")
+	}
 
 	r.versionSet = true
 	r.Version = parsedVersion
 	r.Command = parsedCommand
 	r.Missing = missing
+	r.Acquire = acquire
+	r.AcquisitionStatus = acquisitionStatus
+	r.AcquisitionRetry = acquisitionRetry
 	return nil
 }
 

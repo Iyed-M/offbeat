@@ -130,6 +130,7 @@ func TestRunRespondsToSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	t.Cleanup(func() { _ = d.Close() })
 
 	sigCh := make(chan os.Signal, 1)
@@ -198,6 +199,7 @@ func TestDaemonHelperProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	defer func() { _ = d.Close() }()
 	if err := d.Run(context.Background(), RunOptions{}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -210,6 +212,7 @@ func TestRunRespondsToContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	t.Cleanup(func() { _ = d.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -231,6 +234,7 @@ func TestRunReleasesOwnershipAfterStaleSocketResolutionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	if err := os.WriteFile(SocketPath(d.socketDir), []byte("not a socket"), 0o600); err != nil {
 		t.Fatalf("create non-socket entry: %v", err)
 	}
@@ -247,6 +251,7 @@ func TestRunReleasesOwnershipAfterSocketBindFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	if err := os.Remove(d.socketDir); err != nil {
 		t.Fatalf("remove socket dir: %v", err)
 	}
@@ -400,8 +405,8 @@ func TestStatusCommandReportsDaemonIdentity(t *testing.T) {
 	if !status.DBReady {
 		t.Error("DBReady=false want true")
 	}
-	if status.SchemaVersion != 3 {
-		t.Errorf("SchemaVersion=%d want 3", status.SchemaVersion)
+	if status.SchemaVersion != 4 {
+		t.Errorf("SchemaVersion=%d want 4", status.SchemaVersion)
 	}
 	if status.StartedAt.IsZero() {
 		t.Error("StartedAt is zero")
@@ -666,6 +671,7 @@ func startDaemonForTest(t *testing.T, version string) *Daemon {
 	if err != nil {
 		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	t.Cleanup(func() { _ = d.Close() })
 
 	done := make(chan error, 1)
@@ -692,6 +698,9 @@ func startDaemonWithConfig(t *testing.T, configPath, version string) (*Daemon, e
 	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, ConfigPath: configPath, Version: version, AdapterCredential: testAdapterCredential})
 	if err != nil {
 		return nil, err
+	}
+	if d.Cfg.SpotifyAdapter.Port == 16352 {
+		d.Cfg.SpotifyAdapter.Port = availableAdapterTestPort(t)
 	}
 	t.Cleanup(func() { _ = d.Close() })
 
@@ -747,4 +756,17 @@ func mustReadResponse(t *testing.T, r net.Conn) ipc.Response {
 		t.Fatalf("decode response: %v", err)
 	}
 	return resp
+}
+
+func availableAdapterTestPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
 }

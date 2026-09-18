@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestMigrateRunsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
-	if len(first) != 3 || first[0] != 1 || first[1] != 2 || first[2] != 3 {
+	if !reflect.DeepEqual(first, []int{1, 2, 3, 4}) {
 		t.Fatalf("first applied=%v", first)
 	}
 	second, err := d.Migrate(ctx, nil, "")

@@ -172,6 +172,9 @@ func (l *Loader) Load() (Config, error) {
 	if err := ValidateSpotifyAdapter(cfg.SpotifyAdapter); err != nil {
 		return cfg, err
 	}
+	if cfg.Acquisition.Concurrency < 1 || cfg.Acquisition.Concurrency > 32 {
+		return cfg, fmt.Errorf("acquisition concurrency must be between 1 and 32")
+	}
 	return cfg, nil
 }
 

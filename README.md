@@ -6,11 +6,11 @@ Offbeat mirrors Spotify playlists and Liked Songs into a managed local audio lib
 
 ## Current status
 
-Milestones 1–5 are implemented.
+Milestones 1–6 are implemented.
 
 The daemon, CLI, and Spicetify extension can collect and strictly validate a complete normalized candidate containing real playlists and Liked Songs through Spotify Desktop's authenticated Platform facade. Collection preserves ordering and duplicate occurrences and rejects incomplete required pages.
 
-The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. **Milestone 6 is next:** minimal authorized acquisition.
+The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. `offbeat acquire` queues explicit authorized media sources, retrieves audio through yt-dlp, and publishes managed files with restart-safe work. **Milestone 7 is next:** desktop M3U8 materialization.
 
 On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now favors a current-state-first implementation over speculative historical revision, matching/review, asset-deduplication, and advanced Android-sync infrastructure.
 
@@ -18,12 +18,12 @@ On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now
 
 | Component | Path | Current responsibility |
 |---|---|---|
-| Daemon | `cmd/offbeatd` | lifecycle, Control protocol, Adapter session, desired-state commits, managed-track availability |
-| CLI | `cmd/offbeat` | `status`, `config`, `spotify sync`, and `missing` requests |
+| Daemon | `cmd/offbeatd` | lifecycle, Control protocol, Adapter session, desired-state commits, managed-track availability, acquisition workers |
+| CLI | `cmd/offbeat` | `status`, `config`, `spotify sync`, `missing`, and `acquire` requests |
 | Spicetify extension | `spicetify/offbeat` | complete normalized playlist + Liked Songs collection |
 | Config | `internal/config` | TOML configuration/defaults |
-| DB | `internal/db` | SQLite ownership, migrations, desired-state reconciliation, managed-file mappings |
-| Managed files | `internal/managed` | confined file access and atomic synthetic WAV publication |
+| DB | `internal/db` | SQLite ownership, migrations, desired-state reconciliation, managed-file mappings, durable acquisition work |
+| Managed files | `internal/managed` | confined file access and atomic audio publication |
 | Logging | `internal/logging` | `log/slog` wrapper |
 
 ## Build and test
@@ -87,10 +87,9 @@ See [`spicetify/offbeat/README.md`](spicetify/offbeat/README.md) for the manual 
 
 The authoritative roadmap is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
-Remaining milestones after M5:
+Remaining milestones after M6:
 
 ```text
-M6  minimal authorized acquisition
 M7  desktop M3U8 materialization
 M8  one-device Android manual sync
 M9  setup, packaging, and reliability
@@ -131,6 +130,44 @@ go test ./cmd/offbeat -run 'TestCLI(MissingDesiredTracks|ManagedFixtureAvailabil
 The harness starts a real daemon owner in a temporary home, seeds desired state through its database boundary, and runs the built CLI against its Unix socket. It enables `app.Options.EnableSyntheticFixtures` and calls `Daemon.RegisterSyntheticTrackFixture(ctx, spotifyURI)` to atomically publish a 100ms silent PCM WAV for a supported desired track. This in-process development/test mechanism is disabled by default and has no CLI, environment, or Control-protocol switch.
 
 The gate verifies exact available/missing sets, restart, duplicate references, metadata changes, reference removal/re-addition, physical file loss, and injected registration failure. A failed database registration may leave a complete unregistered file; it stays missing until registration succeeds on retry. Temporary files are not registered as available.
+
+## Authorized acquisition
+
+Choose a supported track from `offbeat missing` and explicitly supply a media URL you are authorized to download:
+
+```bash
+offbeat acquire spotify:track:TRACK_ID 'https://your-media-host.example/audio.flac'
+offbeat acquire status 1
+offbeat acquire retry 1
+```
+
+Submission declares that you are authorized to download the supplied source. Offbeat does not search for matches or obtain Spotify audio. HTTP(S) URLs are accepted; local paths, search expressions, embedded credentials, and fragments are rejected. Each request retrieves one item. Supported output formats are WAV, MP3, M4A, Opus, Ogg, FLAC, and AAC.
+
+The submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `failed`, or `complete`. `retry` requeues failed work with the same source and ID. To correct the source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
+
+Install yt-dlp, FFmpeg, and ffprobe separately. Their executable locations and the worker limit are configurable:
+
+```toml
+[downloader]
+yt_dlp_path = "yt-dlp"
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+
+[acquisition]
+concurrency = 2
+```
+
+Concurrency must be between 1 and 32. Restart the daemon to apply configuration changes. The older `temp_retry_backoff` and `max_temp_retries` configuration fields are retained for compatibility but unused; failures require manual retry. Tool failures are reported without reflecting source URLs or subprocess output. Check the source and configured tool installations before retrying.
+
+The daemon stores acquisition work in SQLite schema version 4 and requeues interrupted running work on startup. A failed track does not stop other workers. yt-dlp uses private temporary staging, ignores user configuration/plugins, and preserves native audio when possible; FFmpeg extracts audio when necessary. ffprobe checks the completed audio before publication. The daemon copies completed media into a managed temporary file, then atomically installs it and commits its mapping together with completion. A failed database commit may leave an unregistered complete file, which stays missing until a later successful acquisition. Abrupt termination can leave staging files in the system temporary directory; these are never registered as playable files.
+
+A track removed from Desired Spotify state during retrieval is not published. Acquisition does not change the Spotify state revision. Playlist generation is M7.
+
+The deterministic tests inject the retrieval boundary and cover failure isolation, manual retry, bounded workers, shutdown, and restart. To also exercise installed tools against generated local audio:
+
+```bash
+OFFBEAT_TEST_REAL_TOOLS=1 go test ./internal/acquisition ./internal/app -run 'RealTools' -count=1 -v
+```
 
 ## Planning workflow
 

@@ -311,7 +311,9 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: response.Err})
 		return ""
 	}
+	d.managedMu.Lock()
 	metadata, summary, changed, err := d.DB.ApplyDesiredSpotifyState(pending.ctx, response.Candidate)
+	d.managedMu.Unlock()
 	if err != nil {
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: &persistenceError{err}})
 		return ""

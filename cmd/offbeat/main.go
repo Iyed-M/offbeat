@@ -61,6 +61,18 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runMissing(configPath, homeDir))
+	case "acquire":
+		if len(rest) == 2 && rest[0] == "status" {
+			os.Exit(runAcquireStatus(configPath, homeDir, rest[1]))
+		}
+		if len(rest) == 2 && rest[0] == "retry" {
+			os.Exit(runAcquireRetry(configPath, homeDir, rest[1]))
+		}
+		if len(rest) == 2 {
+			os.Exit(runAcquire(configPath, homeDir, rest[0], rest[1]))
+		}
+		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status <id> | offbeat acquire retry <id>")
+		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
@@ -81,6 +93,7 @@ func printHelp() {
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
 	fmt.Println("  missing       list supported desired tracks without a managed file")
+	fmt.Println("  acquire       request, inspect, or retry authorized media acquisition")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }

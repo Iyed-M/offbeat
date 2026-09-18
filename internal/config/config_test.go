@@ -179,3 +179,18 @@ func TestLoadEmptyTOML(t *testing.T) {
 		t.Fatalf("Load empty: %v", err)
 	}
 }
+
+func TestAcquisitionConcurrencyBounds(t *testing.T) {
+	for _, value := range []string{"0", "-1", "33"} {
+		t.Run(value, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "config.toml")
+			if err := os.WriteFile(path, []byte("[acquisition]\nconcurrency="+value+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewLoader(home, path).Load(); err == nil {
+				t.Fatal("invalid concurrency accepted")
+			}
+		})
+	}
+}
