@@ -40,7 +40,44 @@ func TestSpotifySyncCompletesOnlyForMatchingCandidateResponse(t *testing.T) {
 	request := readAdapterMessage(t, adapter)
 	requestID := assertSnapshotRequest(t, request)
 	writeCandidateResponse(t, adapter, requestID)
-	assertSyncSuccess(t, syncResponse(t, <-done))
+	response := syncResponse(t, <-done)
+	assertSyncSuccess(t, response)
+	result := decodeSyncResult(t, response)
+	if !result.Changed || result.StateRevision != 1 || result.PlaylistCount != 0 || result.PlaylistEntryCount != 0 || result.LikedSongsEntryCount != 0 || result.SupportedEntryOccurrences != 0 || result.UnsupportedEntryOccurrences != 0 {
+		t.Fatalf("sync result = %#v", result)
+	}
+	_, metadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatalf("read committed state: %v", err)
+	}
+	if metadata.Revision != 1 || metadata.LastCommittedAt == nil {
+		t.Fatalf("state was not committed before sync success: %#v", metadata)
+	}
+}
+
+func TestSpotifySyncSanitizesPersistenceFailureAndRollsBack(t *testing.T) {
+	d := startAdapterDaemon(t)
+	if _, err := d.DB.Exec(`CREATE TRIGGER fail_liked_entry BEFORE INSERT ON liked_entries BEGIN SELECT RAISE(ABORT, 'raw sqlite failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	done := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{"position": 0, "kind": "unsupported"}}}},
+	})
+	response := syncResponse(t, <-done)
+	if response.Error == nil || response.Error.Code != ipc.CodeInternal || response.Error.Message != "could not commit Spotify desired state" || strings.Contains(response.Error.Message, "sqlite") {
+		t.Fatalf("sync failure = %#v", response.Error)
+	}
+	state, metadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatalf("read rolled back state: %v", err)
+	}
+	if len(state.Tracks) != 0 || len(state.Playlists) != 0 || len(state.LikedSongs) != 0 || metadata.Revision != 0 || metadata.LastCommittedAt != nil {
+		t.Fatalf("state survived failed sync: state=%#v metadata=%#v", state, metadata)
+	}
 }
 
 func TestSpotifySyncReportsCorrelatedCollectionFailure(t *testing.T) {
@@ -102,6 +139,40 @@ func TestSpotifySyncTimesOutWithoutResponse(t *testing.T) {
 	requestID := assertSnapshotRequest(t, readAdapterMessage(t, replacement))
 	writeCandidateResponse(t, replacement, requestID)
 	assertSyncSuccess(t, syncResponse(t, <-done))
+}
+
+func TestSpotifySyncDoesNotTimeOutWhileApplyingAcceptedResponse(t *testing.T) {
+	d := startAdapterDaemon(t)
+	d.snapshotTimeout = 30 * time.Millisecond
+	// DB intentionally permits one connection. Holding it blocks the apply
+	// after the response has been accepted, past the response-wait timeout.
+	tx, err := d.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin blocking transaction: %v", err)
+	}
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	done := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeCandidateResponse(t, adapter, requestID)
+	waitForSnapshotApplying(t, d)
+	time.Sleep(2 * d.snapshotTimeout)
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("release blocking transaction: %v", err)
+	}
+	response := syncResponse(t, <-done)
+	assertSyncSuccess(t, response)
+	result := decodeSyncResult(t, response)
+	if !result.Changed || result.StateRevision != 1 {
+		t.Fatalf("sync result = %#v", result)
+	}
+	_, metadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatalf("read committed state: %v", err)
+	}
+	if metadata.Revision != 1 || metadata.LastCommittedAt == nil {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	assertAdapterConnected(t, d, true)
 }
 
 func TestSpotifySyncCancellationInvalidatesOwningAdapterSession(t *testing.T) {
@@ -341,6 +412,19 @@ func assertSyncSuccess(t *testing.T, response ipc.Response) {
 	}
 }
 
+func decodeSyncResult(t *testing.T, response ipc.Response) ipc.SpotifySyncResult {
+	t.Helper()
+	raw, err := ipc.Encode(response.Result)
+	if err != nil {
+		t.Fatalf("encode sync result: %v", err)
+	}
+	var result ipc.SpotifySyncResult
+	if err := ipc.Decode(raw, &result); err != nil {
+		t.Fatalf("decode sync result: %v", err)
+	}
+	return result
+}
+
 func assertSyncFailure(t *testing.T, response ipc.Response, message string) {
 	t.Helper()
 	if response.Error == nil || response.Error.Code != ipc.CodeFailedPrecondition || !strings.Contains(response.Error.Message, message) {
@@ -355,4 +439,19 @@ func assertAdapterClosed(t *testing.T, conn *websocket.Conn) {
 	if _, _, err := conn.Read(ctx); websocket.CloseStatus(err) != websocket.StatusGoingAway {
 		t.Fatalf("adapter close status = %v, want %v", websocket.CloseStatus(err), websocket.StatusGoingAway)
 	}
+}
+
+func waitForSnapshotApplying(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		d.adapterMu.Lock()
+		applying := d.pendingSnapshot != nil && d.pendingSnapshot.applying
+		d.adapterMu.Unlock()
+		if applying {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("snapshot response was not accepted for persistence")
 }

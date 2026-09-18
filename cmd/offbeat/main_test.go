@@ -227,7 +227,7 @@ func TestCLISpotifySyncPrintsCandidateSuccess(t *testing.T) {
 		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{}}},
 	})
 	result := <-done
-	if result.err != nil || result.errOut != "" || result.out != "Spotify candidate snapshot received.\n" {
+	if result.err != nil || result.errOut != "" || result.out != "Spotify desired state committed (revision 1): 0 playlists, 0 playlist entries, 0 Liked Songs entries, 0 supported entries, 0 unsupported entries.\n" {
 		t.Fatalf("offbeat spotify sync = stdout %q stderr %q err %v", result.out, result.errOut, result.err)
 	}
 }
