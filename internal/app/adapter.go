@@ -311,13 +311,13 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: response.Err})
 		return ""
 	}
-	metadata, summary, err := d.DB.ApplyInitialDesiredSpotifyState(pending.ctx, response.Candidate)
+	metadata, summary, changed, err := d.DB.ApplyDesiredSpotifyState(pending.ctx, response.Candidate)
 	if err != nil {
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: &persistenceError{err}})
 		return ""
 	}
 	d.completeSnapshotResponse(pending, snapshotCompletion{result: ipc.SpotifySyncResult{
-		Changed: true, StateRevision: metadata.Revision,
+		Changed: changed, StateRevision: metadata.Revision,
 		PlaylistCount: summary.PlaylistCount, PlaylistEntryCount: summary.PlaylistEntryCount,
 		LikedSongsEntryCount:        summary.LikedSongsEntryCount,
 		SupportedEntryOccurrences:   summary.SupportedEntryOccurrences,

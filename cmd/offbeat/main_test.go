@@ -230,6 +230,25 @@ func TestCLISpotifySyncPrintsCandidateSuccess(t *testing.T) {
 	if result.err != nil || result.errOut != "" || result.out != "Spotify desired state committed (revision 1): 0 playlists, 0 playlist entries, 0 Liked Songs entries, 0 supported entries, 0 unsupported entries.\n" {
 		t.Fatalf("offbeat spotify sync = stdout %q stderr %q err %v", result.out, result.errOut, result.err)
 	}
+
+	done = make(chan cliResult, 1)
+	go func() {
+		out, errOut, err := runCLI(t, home, "spotify", "sync")
+		done <- cliResult{out, errOut, err}
+	}()
+	request = readCLIAdapterJSON(t, adapter)
+	requestID, ok = request["request_id"].(string)
+	if !ok || request["type"] != "snapshot.request" {
+		t.Fatalf("second snapshot request = %#v", request)
+	}
+	writeCLIAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{}}},
+	})
+	result = <-done
+	if result.err != nil || result.errOut != "" || result.out != "Spotify desired state unchanged (revision 1): 0 playlists, 0 playlist entries, 0 Liked Songs entries, 0 supported entries, 0 unsupported entries.\n" {
+		t.Fatalf("equivalent offbeat spotify sync = stdout %q stderr %q err %v", result.out, result.errOut, result.err)
+	}
 }
 
 func TestCLISpotifySyncWaitBudgetExceedsM3SnapshotTimeout(t *testing.T) {

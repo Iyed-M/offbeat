@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -100,18 +101,18 @@ func TestCurrentStateSchemaConstrainsEntryRepresentation(t *testing.T) {
 	}
 }
 
-func TestApplyInitialDesiredSpotifyStateCommitsExactCandidate(t *testing.T) {
+func TestApplyDesiredSpotifyStateReconcilesAndSkipsEquivalentCandidate(t *testing.T) {
 	d := newTestDB(t)
 	ctx := context.Background()
 	if _, err := d.Migrate(ctx, nil, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	candidate, want := desiredCandidateFixture()
-	metadata, summary, err := d.ApplyInitialDesiredSpotifyState(ctx, candidate)
+	candidateA, wantA := desiredCandidateFixture()
+	metadata, summary, changed, err := d.ApplyDesiredSpotifyState(ctx, candidateA)
 	if err != nil {
-		t.Fatalf("apply initial state: %v", err)
+		t.Fatalf("apply A: %v", err)
 	}
-	if metadata.Revision != 1 || metadata.LastCommittedAt == nil || metadata.LastCommittedAt.IsZero() || metadata.LastCommittedAt.Location() != time.UTC {
+	if !changed || metadata.Revision != 1 || metadata.LastCommittedAt == nil || metadata.LastCommittedAt.IsZero() || metadata.LastCommittedAt.Location() != time.UTC {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 	if summary != (SpotifySyncSummary{PlaylistCount: 2, PlaylistEntryCount: 4, LikedSongsEntryCount: 3, SupportedEntryOccurrences: 4, UnsupportedEntryOccurrences: 3}) {
@@ -121,36 +122,121 @@ func TestApplyInitialDesiredSpotifyStateCommitsExactCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read committed state: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("state = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(got, wantA) {
+		t.Fatalf("state = %#v, want %#v", got, wantA)
 	}
 	if persistedMetadata.Revision != 1 || persistedMetadata.LastCommittedAt == nil || !persistedMetadata.LastCommittedAt.Equal(*metadata.LastCommittedAt) {
 		t.Fatalf("persisted metadata = %#v", persistedMetadata)
 	}
+
+	candidateB, wantB := desiredCandidateBFixture()
+	metadata, summary, changed, err = d.ApplyDesiredSpotifyState(ctx, candidateB)
+	if err != nil {
+		t.Fatalf("apply B: %v", err)
+	}
+	if !changed || metadata.Revision != 2 || summary != (SpotifySyncSummary{PlaylistCount: 2, PlaylistEntryCount: 4, LikedSongsEntryCount: 4, SupportedEntryOccurrences: 6, UnsupportedEntryOccurrences: 2}) {
+		t.Fatalf("B result = metadata %#v summary %#v changed %v", metadata, summary, changed)
+	}
+	got, persistedMetadata, err = d.ReadDesiredSpotifyState(ctx)
+	if err != nil || !reflect.DeepEqual(got, wantB) || persistedMetadata.Revision != 2 {
+		t.Fatalf("B state = %#v metadata %#v err %v", got, persistedMetadata, err)
+	}
+	committedAt := *persistedMetadata.LastCommittedAt
+	metadata, summary, changed, err = d.ApplyDesiredSpotifyState(ctx, candidateB)
+	if err != nil || changed || metadata.Revision != 2 || metadata.LastCommittedAt == nil || !metadata.LastCommittedAt.Equal(committedAt) {
+		t.Fatalf("equivalent B result = metadata %#v summary %#v changed %v err %v", metadata, summary, changed, err)
+	}
 }
 
-func TestApplyInitialDesiredSpotifyStateRollsBackSQLiteFailure(t *testing.T) {
+func TestApplyDesiredSpotifyStateRollsBackSQLiteFailure(t *testing.T) {
 	d := newTestDB(t)
 	ctx := context.Background()
 	if _, err := d.Migrate(ctx, nil, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	candidateA, _ := desiredCandidateFixture()
+	candidateB, wantB := desiredCandidateBFixture()
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidateA); err != nil {
+		t.Fatalf("apply A: %v", err)
+	}
+	metadata, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidateB)
+	if err != nil {
+		t.Fatalf("apply B: %v", err)
+	}
+	committedAt := *metadata.LastCommittedAt
 	if _, err := d.ExecContext(ctx, `CREATE TRIGGER fail_liked_entry BEFORE INSERT ON liked_entries BEGIN SELECT RAISE(ABORT, 'forced failure'); END`); err != nil {
 		t.Fatalf("create failure trigger: %v", err)
 	}
-	candidate, _ := desiredCandidateFixture()
-	if _, _, err := d.ApplyInitialDesiredSpotifyState(ctx, candidate); err == nil {
+	candidateC := candidateB
+	candidateC.LikedSongs = append(candidateC.LikedSongs, desired.CandidateEntry{Position: 4, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:failure"})
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidateC); err == nil {
 		t.Fatal("apply succeeded despite SQLite failure")
 	}
 	state, metadata, err := d.ReadDesiredSpotifyState(ctx)
 	if err != nil {
 		t.Fatalf("read state after rollback: %v", err)
 	}
-	if !reflect.DeepEqual(state, desired.State{Tracks: []desired.Track{}, Playlists: []desired.Playlist{}, LikedSongs: []desired.Entry{}}) {
-		t.Fatalf("state survived rollback: %#v", state)
+	if !reflect.DeepEqual(state, wantB) {
+		t.Fatalf("state after rollback = %#v, want %#v", state, wantB)
 	}
-	if metadata.Revision != 0 || metadata.LastCommittedAt != nil {
-		t.Fatalf("metadata survived rollback: %#v", metadata)
+	if metadata.Revision != 2 || metadata.LastCommittedAt == nil || !metadata.LastCommittedAt.Equal(committedAt) {
+		t.Fatalf("metadata after rollback = %#v", metadata)
+	}
+}
+
+func TestApplyDesiredSpotifyStateReordersExistingPlaylistPositions(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	candidate, _ := desiredCandidateFixture()
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidate); err != nil {
+		t.Fatalf("apply initial candidate: %v", err)
+	}
+	for index := range candidate.Playlists {
+		candidate.Playlists[index].Position = 1 - candidate.Playlists[index].Position
+	}
+	metadata, _, changed, err := d.ApplyDesiredSpotifyState(ctx, candidate)
+	if err != nil || !changed || metadata.Revision != 2 {
+		t.Fatalf("reorder result = metadata %#v changed %v err %v", metadata, changed, err)
+	}
+	state, _, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil || !reflect.DeepEqual(state, stateFromCandidate(candidate)) {
+		t.Fatalf("reordered state = %#v err %v", state, err)
+	}
+}
+
+func TestDesiredSpotifyStateSurvivesDatabaseReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "offbeat.db")
+	d, err := OpenFile(ctx, path)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	candidate, want := desiredCandidateBFixture()
+	metadata, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidate)
+	if err != nil {
+		t.Fatalf("apply desired state: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	d, err = OpenFile(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer d.Close()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatalf("migrate reopened database: %v", err)
+	}
+	state, reopenedMetadata, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil || !reflect.DeepEqual(state, want) || reopenedMetadata.Revision != metadata.Revision || reopenedMetadata.LastCommittedAt == nil || !reopenedMetadata.LastCommittedAt.Equal(*metadata.LastCommittedAt) {
+		t.Fatalf("reopened state = %#v metadata %#v err %v", state, reopenedMetadata, err)
 	}
 }
 
@@ -166,6 +252,16 @@ func desiredCandidateFixture() (desired.Candidate, desired.State) {
 		{URI: "spotify:playlist:two", Name: "Two", Position: 1, Entries: []desired.Entry{{Position: 0, Kind: desired.EntrySupported, TrackURI: trackTwo.URI}}},
 	}, LikedSongs: []desired.Entry{{Position: 0, Kind: desired.EntryUnsupported}, {Position: 1, Kind: desired.EntrySupported, TrackURI: trackTwo.URI}, {Position: 2, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:two"}}}
 	return candidate, state
+}
+
+func desiredCandidateBFixture() (desired.Candidate, desired.State) {
+	trackOne := desired.Track{URI: "spotify:track:one", Name: "One (remastered)", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist One"}, {URI: "spotify:artist:guest", Name: "Guest"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album One"}, DurationMS: 1100}
+	trackThree := desired.Track{URI: "spotify:track:three", Name: "Three", Artists: []desired.NamedURI{{URI: "spotify:artist:three", Name: "Artist Three"}}, Album: desired.NamedURI{URI: "spotify:album:three", Name: "Album Three"}, DurationMS: 3000}
+	candidate := desired.Candidate{Playlists: []desired.CandidatePlaylist{
+		{URI: "spotify:playlist:two", Name: "Two renamed", Position: 0, Entries: []desired.CandidateEntry{{Position: 0, Kind: desired.EntrySupported, Track: &trackThree}, {Position: 1, Kind: desired.EntrySupported, Track: &trackOne}, {Position: 2, Kind: desired.EntrySupported, Track: &trackOne}}},
+		{URI: "spotify:playlist:three", Name: "Three", Position: 1, Entries: []desired.CandidateEntry{{Position: 0, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:three"}}},
+	}, LikedSongs: []desired.CandidateEntry{{Position: 0, Kind: desired.EntrySupported, Track: &trackOne}, {Position: 1, Kind: desired.EntryUnsupported}, {Position: 2, Kind: desired.EntrySupported, Track: &trackThree}, {Position: 3, Kind: desired.EntrySupported, Track: &trackOne}}}
+	return candidate, stateFromCandidate(candidate)
 }
 
 func insertTrack(t *testing.T, d *DB, track desired.Track) {
