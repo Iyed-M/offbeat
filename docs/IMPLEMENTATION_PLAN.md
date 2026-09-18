@@ -62,7 +62,7 @@ Rules:
 
 ### M0 — Repository and architecture skeleton
 
-Completed foundation: Go module, daemon/CLI skeleton, configuration, logging, SQLite migration runner, CI, basic domain IDs/types.
+Completed foundation: Go module, daemon/CLI skeleton, configuration, logging, SQLite migration runner, and CI.
 
 ### M1 — Daemon ownership and CLI IPC
 
