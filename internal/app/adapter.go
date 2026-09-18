@@ -252,7 +252,7 @@ func (d *Daemon) handleSpotifySync(ctx context.Context) (any, error) {
 		return spotifySyncCompletion(completion)
 	case <-timer.C:
 		message := "Timed out waiting for Spotify adapter snapshot response."
-		if d.invalidateAdapterSession(pending.session, pending, errors.New(message), message) {
+		if d.invalidateSnapshotResponseWait(pending.session, pending, errors.New(message), message) {
 			return nil, ipc.NewError(ipc.CodeFailedPrecondition, message)
 		}
 		return spotifySyncCompletion(<-pending.result)
@@ -337,6 +337,24 @@ func (d *Daemon) completeSnapshotResponse(pending *pendingSnapshot, completion s
 	d.pendingSnapshot = nil
 	d.adapterMu.Unlock()
 	pending.result <- completion
+}
+
+// invalidateSnapshotResponseWait only expires a request that is still waiting
+// for the Adapter response. Once a matching response is accepted, persistence
+// owns completion and must be allowed to report its committed result.
+func (d *Daemon) invalidateSnapshotResponseWait(session *adapterSession, expected *pendingSnapshot, pendingErr error, closeReason string) bool {
+	d.adapterMu.Lock()
+	if d.adapterSession != session || d.pendingSnapshot != expected || expected.applying {
+		d.adapterMu.Unlock()
+		return false
+	}
+	d.adapterSession = nil
+	d.pendingSnapshot = nil
+	d.adapterMu.Unlock()
+	expected.cancel()
+	expected.result <- snapshotCompletion{err: pendingErr}
+	_ = session.conn.Close(websocket.StatusGoingAway, closeReason)
+	return true
 }
 
 func (d *Daemon) acceptAdapterMessage(session *adapterSession, data []byte) string {
