@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,128 @@ import (
 type stateQuerier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// ErrDesiredSpotifyStateAlreadyCommitted marks the intentionally narrow M4
+// first-commit boundary. Reconciliation belongs to the following ticket.
+var ErrDesiredSpotifyStateAlreadyCommitted = errors.New("desired Spotify state is already committed")
+
+// SpotifySyncSummary counts entry occurrences rather than distinct tracks.
+type SpotifySyncSummary struct {
+	PlaylistCount               int
+	PlaylistEntryCount          int
+	LikedSongsEntryCount        int
+	SupportedEntryOccurrences   int
+	UnsupportedEntryOccurrences int
+}
+
+// ApplyInitialDesiredSpotifyState atomically commits the first validated
+// candidate. It deliberately rejects later applies rather than anticipating
+// reconciliation policy.
+func (d *DB) ApplyInitialDesiredSpotifyState(ctx context.Context, candidate desired.Candidate) (desired.Metadata, SpotifySyncSummary, error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("begin desired state apply: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, metadata, err := readDesiredSpotifyState(ctx, tx)
+	if err != nil {
+		return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("read current desired state: %w", err)
+	}
+	if metadata.Revision != 0 {
+		return desired.Metadata{}, SpotifySyncSummary{}, ErrDesiredSpotifyStateAlreadyCommitted
+	}
+
+	summary := summarizeCandidate(candidate)
+	tracks := make(map[string]desired.Track)
+	for _, playlist := range candidate.Playlists {
+		for _, entry := range playlist.Entries {
+			if entry.Kind == desired.EntrySupported {
+				tracks[entry.Track.URI] = *entry.Track
+			}
+		}
+	}
+	for _, entry := range candidate.LikedSongs {
+		if entry.Kind == desired.EntrySupported {
+			tracks[entry.Track.URI] = *entry.Track
+		}
+	}
+	for _, track := range tracks {
+		artists, err := json.Marshal(track.Artists)
+		if err != nil {
+			return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("encode track artists: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO spotify_tracks(uri, name, artists_json, album_uri, album_name, duration_ms) VALUES (?, ?, ?, ?, ?, ?)`, track.URI, track.Name, string(artists), track.Album.URI, track.Album.Name, track.DurationMS); err != nil {
+			return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("insert supported track: %w", err)
+		}
+	}
+	for _, playlist := range candidate.Playlists {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO playlists(uri, name, position) VALUES (?, ?, ?)`, playlist.URI, playlist.Name, playlist.Position); err != nil {
+			return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("insert playlist: %w", err)
+		}
+		if err := insertCandidateEntries(ctx, tx, `INSERT INTO playlist_entries(playlist_uri, position, kind, track_uri, source_uri) VALUES (?, ?, ?, ?, ?)`, playlist.URI, playlist.Entries); err != nil {
+			return desired.Metadata{}, SpotifySyncSummary{}, err
+		}
+	}
+	if err := insertCandidateEntries(ctx, tx, `INSERT INTO liked_entries(position, kind, track_uri, source_uri) VALUES (?, ?, ?, ?)`, "", candidate.LikedSongs); err != nil {
+		return desired.Metadata{}, SpotifySyncSummary{}, err
+	}
+	committedAt := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE state_metadata SET revision = 1, last_committed_at = ? WHERE singleton_id = 1`, committedAt.Format(time.RFC3339Nano)); err != nil {
+		return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("update desired state metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return desired.Metadata{}, SpotifySyncSummary{}, fmt.Errorf("commit desired state: %w", err)
+	}
+	committed = true
+	return desired.Metadata{Revision: 1, LastCommittedAt: &committedAt}, summary, nil
+}
+
+func summarizeCandidate(candidate desired.Candidate) SpotifySyncSummary {
+	summary := SpotifySyncSummary{PlaylistCount: len(candidate.Playlists), LikedSongsEntryCount: len(candidate.LikedSongs)}
+	for _, playlist := range candidate.Playlists {
+		summary.PlaylistEntryCount += len(playlist.Entries)
+		countEntryKinds(&summary, playlist.Entries)
+	}
+	countEntryKinds(&summary, candidate.LikedSongs)
+	return summary
+}
+
+func countEntryKinds(summary *SpotifySyncSummary, entries []desired.CandidateEntry) {
+	for _, entry := range entries {
+		if entry.Kind == desired.EntrySupported {
+			summary.SupportedEntryOccurrences++
+		} else {
+			summary.UnsupportedEntryOccurrences++
+		}
+	}
+}
+
+func insertCandidateEntries(ctx context.Context, tx *sql.Tx, query, playlistURI string, entries []desired.CandidateEntry) error {
+	for _, entry := range entries {
+		var trackURI, sourceURI any
+		if entry.Kind == desired.EntrySupported {
+			trackURI = entry.Track.URI
+		} else if entry.SourceURI != "" {
+			sourceURI = entry.SourceURI
+		}
+		var err error
+		if playlistURI == "" {
+			_, err = tx.ExecContext(ctx, query, entry.Position, entry.Kind, trackURI, sourceURI)
+		} else {
+			_, err = tx.ExecContext(ctx, query, playlistURI, entry.Position, entry.Kind, trackURI, sourceURI)
+		}
+		if err != nil {
+			return fmt.Errorf("insert desired state entry: %w", err)
+		}
+	}
+	return nil
 }
 
 // ReadDesiredSpotifyState returns the complete current Desired Spotify state.

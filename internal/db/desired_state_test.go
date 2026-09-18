@@ -100,6 +100,74 @@ func TestCurrentStateSchemaConstrainsEntryRepresentation(t *testing.T) {
 	}
 }
 
+func TestApplyInitialDesiredSpotifyStateCommitsExactCandidate(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	candidate, want := desiredCandidateFixture()
+	metadata, summary, err := d.ApplyInitialDesiredSpotifyState(ctx, candidate)
+	if err != nil {
+		t.Fatalf("apply initial state: %v", err)
+	}
+	if metadata.Revision != 1 || metadata.LastCommittedAt == nil || metadata.LastCommittedAt.IsZero() || metadata.LastCommittedAt.Location() != time.UTC {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if summary != (SpotifySyncSummary{PlaylistCount: 2, PlaylistEntryCount: 4, LikedSongsEntryCount: 3, SupportedEntryOccurrences: 4, UnsupportedEntryOccurrences: 3}) {
+		t.Fatalf("summary = %#v", summary)
+	}
+	got, persistedMetadata, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil {
+		t.Fatalf("read committed state: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("state = %#v, want %#v", got, want)
+	}
+	if persistedMetadata.Revision != 1 || persistedMetadata.LastCommittedAt == nil || !persistedMetadata.LastCommittedAt.Equal(*metadata.LastCommittedAt) {
+		t.Fatalf("persisted metadata = %#v", persistedMetadata)
+	}
+}
+
+func TestApplyInitialDesiredSpotifyStateRollsBackSQLiteFailure(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := d.ExecContext(ctx, `CREATE TRIGGER fail_liked_entry BEFORE INSERT ON liked_entries BEGIN SELECT RAISE(ABORT, 'forced failure'); END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	candidate, _ := desiredCandidateFixture()
+	if _, _, err := d.ApplyInitialDesiredSpotifyState(ctx, candidate); err == nil {
+		t.Fatal("apply succeeded despite SQLite failure")
+	}
+	state, metadata, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil {
+		t.Fatalf("read state after rollback: %v", err)
+	}
+	if !reflect.DeepEqual(state, desired.State{Tracks: []desired.Track{}, Playlists: []desired.Playlist{}, LikedSongs: []desired.Entry{}}) {
+		t.Fatalf("state survived rollback: %#v", state)
+	}
+	if metadata.Revision != 0 || metadata.LastCommittedAt != nil {
+		t.Fatalf("metadata survived rollback: %#v", metadata)
+	}
+}
+
+func desiredCandidateFixture() (desired.Candidate, desired.State) {
+	trackOne := desired.Track{URI: "spotify:track:one", Name: "One", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist One"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album One"}, DurationMS: 1000}
+	trackTwo := desired.Track{URI: "spotify:track:two", Name: "Two", Artists: []desired.NamedURI{{URI: "spotify:artist:two", Name: "Artist Two"}}, Album: desired.NamedURI{URI: "spotify:album:two", Name: "Album Two"}, DurationMS: 2000}
+	candidate := desired.Candidate{Playlists: []desired.CandidatePlaylist{
+		{URI: "spotify:playlist:two", Name: "Two", Position: 1, Entries: []desired.CandidateEntry{{Position: 0, Kind: desired.EntrySupported, Track: &trackTwo}}},
+		{URI: "spotify:playlist:one", Name: "One", Position: 0, Entries: []desired.CandidateEntry{{Position: 0, Kind: desired.EntrySupported, Track: &trackOne}, {Position: 1, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:one"}, {Position: 2, Kind: desired.EntrySupported, Track: &trackOne}}},
+	}, LikedSongs: []desired.CandidateEntry{{Position: 0, Kind: desired.EntryUnsupported}, {Position: 1, Kind: desired.EntrySupported, Track: &trackTwo}, {Position: 2, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:two"}}}
+	state := desired.State{Tracks: []desired.Track{trackOne, trackTwo}, Playlists: []desired.Playlist{
+		{URI: "spotify:playlist:one", Name: "One", Position: 0, Entries: []desired.Entry{{Position: 0, Kind: desired.EntrySupported, TrackURI: trackOne.URI}, {Position: 1, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:one"}, {Position: 2, Kind: desired.EntrySupported, TrackURI: trackOne.URI}}},
+		{URI: "spotify:playlist:two", Name: "Two", Position: 1, Entries: []desired.Entry{{Position: 0, Kind: desired.EntrySupported, TrackURI: trackTwo.URI}}},
+	}, LikedSongs: []desired.Entry{{Position: 0, Kind: desired.EntryUnsupported}, {Position: 1, Kind: desired.EntrySupported, TrackURI: trackTwo.URI}, {Position: 2, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:two"}}}
+	return candidate, state
+}
+
 func insertTrack(t *testing.T, d *DB, track desired.Track) {
 	t.Helper()
 	artists, err := json.Marshal(track.Artists)
