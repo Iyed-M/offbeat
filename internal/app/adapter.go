@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/desired"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/coder/websocket"
 )
@@ -379,6 +381,7 @@ func parseAdapterLog(data []byte) (slog.Level, string, string) {
 type snapshotResponse struct {
 	RequestID string
 	Err       error
+	Candidate desired.Candidate
 }
 
 func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
@@ -418,10 +421,11 @@ func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
 		return snapshotResponse{}, adapterErrorInvalidMessage
 	}
 	if snapshot, ok := fields["snapshot"]; ok {
-		if _, ok := fields["error"]; ok || parseCandidateSnapshot(snapshot) != nil {
+		candidate, err := parseCandidateSnapshot(snapshot)
+		if _, ok := fields["error"]; ok || err != nil {
 			return snapshotResponse{}, adapterErrorInvalidMessage
 		}
-		return snapshotResponse{RequestID: requestID}, ""
+		return snapshotResponse{RequestID: requestID, Candidate: candidate}, ""
 	}
 	collectionErr, ok := parseCollectionError(fields["error"])
 	if !ok {
@@ -430,78 +434,110 @@ func parseSnapshotResponse(data []byte) (snapshotResponse, string) {
 	return snapshotResponse{RequestID: requestID, Err: collectionErr}, ""
 }
 
-// parseCandidateSnapshot deliberately accepts only normalized M3 data. Spotify
-// Desktop objects stay contained in the extension-local adapter.
-func parseCandidateSnapshot(data json.RawMessage) error {
+// parseCandidateSnapshot deliberately accepts only normalized M3 data and
+// materializes it into Offbeat-owned values. Spotify Desktop objects stay
+// contained in the extension-local adapter.
+func parseCandidateSnapshot(data json.RawMessage) (desired.Candidate, error) {
 	var snapshot struct {
 		Kind       string            `json:"kind"`
 		Playlists  []json.RawMessage `json:"playlists"`
 		LikedSongs json.RawMessage   `json:"liked_songs"`
 	}
 	if !decodeExactObject(data, &snapshot, "kind", "playlists", "liked_songs") || snapshot.Kind != "candidate" || snapshot.Playlists == nil {
-		return errors.New("invalid candidate snapshot")
+		return desired.Candidate{}, errors.New("invalid candidate snapshot")
 	}
-	for _, playlist := range snapshot.Playlists {
+	candidate := desired.Candidate{Playlists: make([]desired.CandidatePlaylist, 0, len(snapshot.Playlists))}
+	tracks := make(map[string]desired.Track)
+	playlists := make(map[string]struct{}, len(snapshot.Playlists))
+	for position, playlist := range snapshot.Playlists {
 		var item struct {
 			URI     string            `json:"uri"`
 			Name    string            `json:"name"`
 			Entries []json.RawMessage `json:"entries"`
 		}
-		if !decodeExactObject(playlist, &item, "uri", "name", "entries") || item.URI == "" || item.Name == "" || item.Entries == nil || !validEntries(item.Entries) {
-			return errors.New("invalid candidate playlist")
+		if !decodeExactObject(playlist, &item, "uri", "name", "entries") || item.URI == "" || item.Name == "" || item.Entries == nil {
+			return desired.Candidate{}, errors.New("invalid candidate playlist")
 		}
+		if _, exists := playlists[item.URI]; exists {
+			return desired.Candidate{}, errors.New("duplicate candidate playlist")
+		}
+		playlists[item.URI] = struct{}{}
+		entries, err := materializeEntries(item.Entries, tracks)
+		if err != nil {
+			return desired.Candidate{}, fmt.Errorf("materialize playlist entries: %w", err)
+		}
+		candidate.Playlists = append(candidate.Playlists, desired.CandidatePlaylist{URI: item.URI, Name: item.Name, Position: position, Entries: entries})
 	}
 	var liked struct {
 		Entries []json.RawMessage `json:"entries"`
 	}
-	if !decodeExactObject(snapshot.LikedSongs, &liked, "entries") || liked.Entries == nil || !validEntries(liked.Entries) {
-		return errors.New("invalid liked songs")
+	if !decodeExactObject(snapshot.LikedSongs, &liked, "entries") || liked.Entries == nil {
+		return desired.Candidate{}, errors.New("invalid liked songs")
 	}
-	return nil
+	entries, err := materializeEntries(liked.Entries, tracks)
+	if err != nil {
+		return desired.Candidate{}, fmt.Errorf("materialize liked songs entries: %w", err)
+	}
+	candidate.LikedSongs = entries
+	return candidate, nil
 }
 
-func validEntries(entries []json.RawMessage) bool {
+func materializeEntries(entries []json.RawMessage, tracks map[string]desired.Track) ([]desired.CandidateEntry, error) {
+	result := make([]desired.CandidateEntry, 0, len(entries))
 	for position, raw := range entries {
 		var entry map[string]json.RawMessage
 		if json.Unmarshal(raw, &entry) != nil {
-			return false
+			return nil, errors.New("invalid entry")
 		}
 		var actualPosition int
 		if value, ok := entry["position"]; !ok || json.Unmarshal(value, &actualPosition) != nil || actualPosition != position {
-			return false
+			return nil, errors.New("non-contiguous entry position")
 		}
 		var kind string
 		if value, ok := entry["kind"]; !ok || json.Unmarshal(value, &kind) != nil {
-			return false
+			return nil, errors.New("invalid entry kind")
 		}
 		switch kind {
 		case "supported":
-			if len(entry) != 3 || validTrack(entry["track"]) == false {
-				return false
+			if len(entry) != 3 {
+				return nil, errors.New("invalid supported entry")
 			}
+			track, err := materializeTrack(entry["track"])
+			if err != nil {
+				return nil, err
+			}
+			if known, exists := tracks[track.URI]; exists && !reflect.DeepEqual(known, track) {
+				return nil, fmt.Errorf("conflicting metadata for track %q", track.URI)
+			}
+			tracks[track.URI] = track
+			trackCopy := track
+			result = append(result, desired.CandidateEntry{Position: position, Kind: desired.EntrySupported, Track: &trackCopy})
 		case "unsupported":
 			if len(entry) != 2 && len(entry) != 3 {
-				return false
+				return nil, errors.New("invalid unsupported entry")
 			}
 			for name := range entry {
 				if name != "position" && name != "kind" && name != "source_uri" {
-					return false
+					return nil, errors.New("invalid unsupported entry")
 				}
 			}
+			candidateEntry := desired.CandidateEntry{Position: position, Kind: desired.EntryUnsupported}
 			if value, ok := entry["source_uri"]; ok {
 				var sourceURI string
 				if json.Unmarshal(value, &sourceURI) != nil || sourceURI == "" {
-					return false
+					return nil, errors.New("invalid unsupported source URI")
 				}
+				candidateEntry.SourceURI = sourceURI
 			}
+			result = append(result, candidateEntry)
 		default:
-			return false
+			return nil, errors.New("unknown entry kind")
 		}
 	}
-	return true
+	return result, nil
 }
 
-func validTrack(data json.RawMessage) bool {
+func materializeTrack(data json.RawMessage) (desired.Track, error) {
 	var track struct {
 		URI        string            `json:"uri"`
 		Name       string            `json:"name"`
@@ -510,22 +546,33 @@ func validTrack(data json.RawMessage) bool {
 		DurationMS int               `json:"duration_ms"`
 	}
 	if !decodeExactObject(data, &track, "uri", "name", "artists", "album", "duration_ms") || track.URI == "" || track.Name == "" || track.DurationMS <= 0 || len(track.Artists) == 0 {
-		return false
+		return desired.Track{}, errors.New("invalid track")
 	}
-	for _, artist := range track.Artists {
-		if !validNamedURI(artist) {
-			return false
+	result := desired.Track{URI: track.URI, Name: track.Name, Artists: make([]desired.NamedURI, 0, len(track.Artists)), DurationMS: track.DurationMS}
+	for _, rawArtist := range track.Artists {
+		artist, err := materializeNamedURI(rawArtist)
+		if err != nil {
+			return desired.Track{}, err
 		}
+		result.Artists = append(result.Artists, artist)
 	}
-	return validNamedURI(track.Album)
+	album, err := materializeNamedURI(track.Album)
+	if err != nil {
+		return desired.Track{}, err
+	}
+	result.Album = album
+	return result, nil
 }
 
-func validNamedURI(data json.RawMessage) bool {
+func materializeNamedURI(data json.RawMessage) (desired.NamedURI, error) {
 	var value struct {
 		URI  string `json:"uri"`
 		Name string `json:"name"`
 	}
-	return decodeExactObject(data, &value, "uri", "name") && value.URI != "" && value.Name != ""
+	if !decodeExactObject(data, &value, "uri", "name") || value.URI == "" || value.Name == "" {
+		return desired.NamedURI{}, errors.New("invalid named URI")
+	}
+	return desired.NamedURI{URI: value.URI, Name: value.Name}, nil
 }
 
 func parseCollectionError(data json.RawMessage) (error, bool) {
