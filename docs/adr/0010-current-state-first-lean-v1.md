@@ -1,6 +1,6 @@
 # ADR 0010: Prefer a current-state-first lean v1
 
-- Status: Accepted
+- Status: Accepted; acquisition decisions amended by ADR-0011
 - Date: 2026-09-17
 
 ## Context
@@ -18,7 +18,7 @@ The following decisions apply to work after Milestone 3:
 1. Preserve the existing M1-M3 architecture: Daemon ownership, Unix-socket Control protocol, authenticated loopback Adapter protocol, strict normalized Spotify candidate snapshots, ordering, duplicates, unsupported placeholders, and candidate atomicity remain required.
 2. Persist the current Spotify desired state atomically. Maintain a simple monotonically increasing state revision when committed desired state changes. Historical snapshots, a general `revision_changes` event log, and `offbeat history` are not v1 requirements.
 3. Model one managed local file per supported Spotify track for v1. Cross-track physical-asset deduplication, many-to-many asset mappings, and reference-counted deletion are deferred.
-4. Do not build fuzzy metadata matching, high/medium/low match confidence, or a persistent human review queue in v1. If acquisition needs an explicit user-provided or otherwise authorized source mapping, model that concrete workflow directly.
+4. Do not build library-wide fuzzy metadata matching, high/medium/low match confidence, or a persistent human review queue in v1. ADR-0011 permits narrow candidate selection inside the concrete YouTube resolution workflow.
 5. Keep the acquisition implementation narrow. `yt-dlp` may remain behind a small process boundary/interface, but v1 does not require a speculative multi-resolver framework or an elaborate state machine. Persist only the work needed for reliable restart-safe acquisition.
 6. Prefer conservative file lifecycle behavior. Automatic destructive cleanup, deep integrity scanning, and sophisticated repair are deferred unless needed to make the core flow safe.
 7. Android v1 targets one personal device and current-state synchronization. Manual address/configuration is acceptable. mDNS/DNS-SD discovery, arbitrary historical revision jumps, resumable file transfer, background automatic sync, and broad multi-device management are deferred.

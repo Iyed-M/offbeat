@@ -4,7 +4,7 @@ Offbeat maintains a local, offline representation of Spotify-organized music for
 
 ## Product direction
 
-ADR-0010 establishes a **current-state-first** v1. Preserve the proven M1–M3 boundaries and add the smallest persistence, managed-file, acquisition, playlist, and Android-sync behavior needed for the end-to-end product. Do not treat old roadmap abstractions as requirements.
+ADR-0010 establishes a **current-state-first** v1, amended by ADR-0011's concrete YouTube Missing-set acquisition workflow. Preserve the proven M1–M3 boundaries and add the smallest persistence, managed-file, acquisition, playlist, and Android-sync behavior needed for the end-to-end product. Do not treat old roadmap abstractions as requirements.
 
 ## Language
 
@@ -54,6 +54,14 @@ A supported track referenced by current Desired Spotify state that has no valid 
 **Acquisition work**:
 Daemon-owned restart-relevant work that retrieves media from a source the user is authorized to download and publishes a Managed track file. v1 keeps this workflow concrete and narrow.
 _Avoid_: generalized resolver pipeline
+
+**YouTube resolution**:
+The concrete v1 process that uses a Missing track's Spotify metadata to select one eligible YouTube media URL for Acquisition work. It is source selection for one track, not a claim that two catalog tracks are the same recording.
+_Avoid_: library matching, fuzzy deduplication
+
+**Missing-set acquisition**:
+An explicitly requested batch that attempts YouTube resolution and Acquisition work for every Missing track in the current Desired Spotify state. Each track succeeds, fails, or remains unresolved independently.
+_Avoid_: full acquire, automatic sync acquisition
 
 **Current-state manifest**:
 The minimal Android-facing description of the playable files/playlists currently desired by the daemon. Lean v1 compares against current phone state; it does not require historical revision replay.

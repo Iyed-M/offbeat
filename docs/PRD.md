@@ -2,7 +2,7 @@
 
 > **Workflow status:** This document is the v1 product baseline, not an active task queue. Use `/to-spec` to publish a scoped milestone/change as a GitHub issue and `/to-tickets` to split approved work into agent-ready issues. GitHub issue state and discussion are authoritative for active delivery.
 >
-> **Scope reset (2026-09-17):** ADR-0010 replaces the original infrastructure-heavy v1 roadmap with a current-state-first product. Milestones 1–3 remain valid and complete. Deferred features should not be reintroduced without a concrete requirement and a scoped decision.
+> **Scope reset (2026-09-17):** ADR-0010 replaces the original infrastructure-heavy v1 roadmap with a current-state-first product. Milestones 1–3 remain valid and complete. ADR-0011 restores one concrete requirement from the earlier direction: explicit missing-set acquisition through a built-in YouTube resolver.
 
 ## 1. Product summary
 
@@ -24,7 +24,8 @@ Spotify Desktop
   -> Spicetify collects complete metadata
   -> offbeatd atomically stores current desired state
   -> missing supported tracks are identified
-  -> authorized media sources are acquired into the managed library
+  -> an explicit command resolves missing tracks to eligible YouTube URLs
+  -> yt-dlp acquires the resolved media into the managed library
   -> desktop M3U8 playlists are generated
   -> one Android device manually syncs the current playable library
   -> ordinary local players work offline
@@ -46,10 +47,13 @@ Offbeat v1 must:
 8. expose a simple monotonically increasing state revision when desired state changes;
 9. maintain one managed local file per supported Spotify track when available;
 10. identify supported desired tracks whose managed file is missing;
-11. acquire media only from sources the user is authorized to download;
-12. generate ordinary `.m3u8` playlists containing the playable subset in Spotify order;
-13. manually synchronize the current playable library to one Android device over the local network;
-14. leave already-synchronized desktop and Android files usable when Spotify, the Internet, or the desktop is later unavailable.
+11. let the user explicitly request acquisition of every currently missing supported track;
+12. resolve each requested track to one eligible YouTube media URL using its Spotify metadata;
+13. acquire resolved media with `yt-dlp` only when the user is authorized to download it;
+14. isolate per-track resolution/download failures so the rest of the missing set continues;
+15. generate ordinary `.m3u8` playlists containing the playable subset in Spotify order;
+16. manually synchronize the current playable library to one Android device over the local network;
+17. leave already-synchronized desktop and Android files usable when Spotify, the Internet, or the desktop is later unavailable.
 
 ## 4. Explicitly deferred from v1
 
@@ -61,7 +65,7 @@ The following were present or implied in the original roadmap but are not requir
 - cross-track physical asset deduplication;
 - many-to-many Spotify-track/asset mappings;
 - reference-counted automatic file deletion;
-- fuzzy metadata matching;
+- library-wide fuzzy metadata matching and cross-track equivalence decisions;
 - high/medium/low match confidence;
 - persistent human match review queues and `offbeat review`;
 - acoustic fingerprinting;
@@ -84,13 +88,15 @@ Deferred features may be added after v1 when real usage demonstrates their value
 
 ## 5. Safety and acquisition boundary
 
-The acquisition subsystem must operate only on sources the user is authorized to download.
+The acquisition subsystem must operate only on sources the user is authorized to download. The user is responsible for ensuring that a selected YouTube item may be downloaded and used as intended.
 
 `yt-dlp` is a media retrieval backend. It is not a Spotify catalog downloader.
 
-Offbeat v1 must not implement an automatic workflow whose purpose is to search arbitrary third-party services for copyrighted Spotify tracks solely to bypass Spotify offline/Premium restrictions.
+Offbeat v1 has one concrete source-resolution workflow: on explicit request, resolve Missing tracks against YouTube and retrieve eligible results with `yt-dlp`. It must not bypass authentication, DRM, paywalls, geographic controls, or other access controls.
 
-The v1 acquisition design should model the concrete authorized source workflow that is actually used. A small boundary around `yt-dlp` is appropriate so command execution details do not leak through the daemon, but v1 does not require a speculative resolver/plugin framework.
+YouTube candidate selection must be conservative and use the Spotify metadata already present in Desired Spotify state. Ambiguous or ineligible candidates remain unresolved. This resolver-local selection is not library-wide fuzzy matching, cross-track deduplication, or a persistent review system.
+
+A small boundary around YouTube resolution and `yt-dlp` is appropriate so external command details do not leak through the daemon, but v1 does not require a speculative resolver/plugin framework.
 
 ## 6. Components and ownership
 
@@ -146,7 +152,9 @@ offbeat status
 offbeat config
 offbeat spotify sync
 offbeat missing
-offbeat acquire ...
+offbeat acquire missing
+offbeat acquire <spotify-track-uri> <authorized-url>
+offbeat acquire status [id]
 ```
 
 Additional setup or Android diagnostic commands may be added when their milestone needs them. `history`, `review`, `verify`, and broad `devices` management are not baseline v1 requirements.
@@ -234,7 +242,7 @@ By the end of the relevant milestones, SQLite needs to model:
 - minimal restart-safe acquisition work;
 - minimal Android sync/authentication state if the chosen M8 design requires persistence.
 
-Historical snapshots, review decisions, generalized source-resolution graphs, and multi-device history are not required unless later specs deliberately add them.
+Historical snapshots, review decisions, generalized source-resolution graphs, and multi-device history are not required. Persist only the selected source and minimal resolution/acquisition outcome needed for the concrete workflow.
 
 ## 10. Managed desktop library
 
@@ -274,7 +282,18 @@ No required v1 behavior may delete files outside Offbeat's managed root.
 
 ### 11.1 Scope
 
-v1 uses `yt-dlp` for the concrete authorized-media retrieval workflow selected in the M6 spec.
+v1 supports two entry points into the same daemon-owned acquisition path:
+
+```bash
+offbeat acquire missing
+offbeat acquire <spotify-track-uri> <authorized-url>
+```
+
+`offbeat acquire missing` snapshots the distinct supported Missing tracks in the current Desired Spotify state. For each track, the built-in YouTube resolver searches using Spotify title, artists, duration, and meaningful version markers, selects one eligible unambiguous result, and queues its URL for retrieval. One unresolved or failed track must not block the rest of the batch.
+
+The direct-URL form remains available when automatic resolution is ambiguous, produces no eligible candidate, or the user prefers a different authorized source. Repeating missing-set acquisition must not create competing active work or reacquire an already available track.
+
+The missing-set command is explicit. `offbeat spotify sync` does not silently start a large acquisition batch.
 
 The rest of the daemon should not depend on `yt-dlp` command-line syntax directly. A small internal interface/process wrapper is sufficient.
 
@@ -285,6 +304,7 @@ Acquisition may take long enough that daemon restart should not silently lose re
 ```text
 pending
 running
+unresolved
 failed
 complete
 ```
@@ -292,6 +312,8 @@ complete
 Exact names are implementation-defined.
 
 Bounded concurrency is required. A simple manual retry is acceptable for v1; complex retry scheduling is not required unless real failure behavior demonstrates a need.
+
+`offbeat acquire missing` must report queued and already-available/active counts. `offbeat acquire status` must report aggregate and per-track pending, running, unresolved, failed, and complete outcomes without requiring a persistent human review queue.
 
 ### 11.3 Media processing
 
@@ -401,14 +423,15 @@ v1 is complete when the following end-to-end scenario works:
 3. `offbeat spotify sync` collects a complete normalized candidate.
 4. The daemon atomically commits the current Spotify desired state.
 5. `offbeat missing` accurately identifies supported desired tracks without managed files.
-6. The user supplies/uses the supported authorized acquisition workflow for a missing track set.
-7. Successful acquisitions appear as managed local audio files.
-8. Offbeat generates desktop `.m3u8` playlists containing available tracks in Spotify order with duplicates preserved.
-9. A normal desktop player can play the managed files/playlists.
-10. One Android phone manually connects/authenticates to Offbeat over the LAN and runs a sync.
-11. The phone receives the current playable audio and playlists.
-12. A normal Android music player can play them.
-13. Already-produced desktop and phone content remains usable after Spotify, Internet access, and the desktop sync service are unavailable.
+6. The user runs `offbeat acquire missing`.
+7. Offbeat resolves each eligible Missing track to a YouTube URL and submits independent Acquisition work.
+8. Successful acquisitions appear as managed local audio files; unresolved or failed tracks remain missing without blocking others.
+9. Offbeat generates desktop `.m3u8` playlists containing available tracks in Spotify order with duplicates preserved.
+10. A normal desktop player can play the managed files/playlists.
+11. One Android phone manually connects/authenticates to Offbeat over the LAN and runs a sync.
+12. The phone receives the current playable audio and playlists.
+13. A normal Android music player can play them.
+14. Already-produced desktop and phone content remains usable after Spotify, Internet access, and the desktop sync service are unavailable.
 
 ## 17. Planning rule
 

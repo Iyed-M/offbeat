@@ -10,9 +10,9 @@ Milestones 1–6 are implemented.
 
 The daemon, CLI, and Spicetify extension can collect and strictly validate a complete normalized candidate containing real playlists and Liked Songs through Spotify Desktop's authenticated Platform facade. Collection preserves ordering and duplicate occurrences and rejects incomplete required pages.
 
-The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. `offbeat acquire` queues explicit authorized media sources, retrieves audio through yt-dlp, and publishes managed files with restart-safe work. **Milestone 7 is next:** desktop M3U8 materialization.
+The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. `offbeat acquire` queues explicit authorized media sources, retrieves audio through yt-dlp, and publishes managed files with restart-safe work. **Milestone 6A is next:** resolve and acquire the complete Missing track set through YouTube before desktop M3U8 materialization.
 
-On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now favors a current-state-first implementation over speculative historical revision, matching/review, asset-deduplication, and advanced Android-sync infrastructure.
+On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now favors a current-state-first implementation over speculative historical revision, library-wide matching/review, asset-deduplication, and advanced Android-sync infrastructure. ADR-0011 restores the concrete YouTube Missing-set acquisition workflow without restoring those generalized systems.
 
 ## Components
 
@@ -90,6 +90,7 @@ The authoritative roadmap is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION
 Remaining milestones after M6:
 
 ```text
+M6A YouTube missing-set acquisition
 M7  desktop M3U8 materialization
 M8  one-device Android manual sync
 M9  setup, packaging, and reliability
@@ -141,7 +142,17 @@ offbeat acquire status 1
 offbeat acquire retry 1
 ```
 
-Submission declares that you are authorized to download the supplied source. Offbeat does not search for matches or obtain Spotify audio. HTTP(S) URLs are accepted; local paths, search expressions, embedded credentials, and fragments are rejected. Each request retrieves one item. Supported output formats are WAV, MP3, M4A, Opus, Ogg, FLAC, and AAC.
+Submission declares that you are authorized to download the supplied source. The currently implemented command does not search for matches or obtain Spotify audio. HTTP(S) URLs are accepted; local paths, search expressions, embedded credentials, and fragments are rejected. Each request retrieves one item. Supported output formats are WAV, MP3, M4A, Opus, Ogg, FLAC, and AAC.
+
+Milestone 6A will add the intended batch workflow:
+
+```bash
+offbeat spotify sync
+offbeat acquire missing
+offbeat acquire status
+```
+
+`acquire missing` will durably queue each distinct Missing track, resolve one eligible unambiguous YouTube result from its Spotify metadata, and reuse the existing acquisition workers. Ambiguous/no-result tracks will remain unresolved without blocking the rest; the explicit track-and-URL form will remain the override. This command is documented as planned and is not implemented yet.
 
 The submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `failed`, or `complete`. `retry` requeues failed work with the same source and ID. To correct the source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
 

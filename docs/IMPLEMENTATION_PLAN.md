@@ -2,7 +2,9 @@
 
 > **Workflow status:** This document is the delivery roadmap, not an active task queue. Before implementation, use `/to-spec` to publish the next milestone as a GitHub issue and `/to-tickets` to split the approved spec into dependency-linked agent-ready issues. GitHub issues are authoritative for execution.
 >
-> **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. Do not recreate removed milestones/tickets merely because they existed in the older plan.
+> **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. ADR-0011 adds only the concrete YouTube missing-set workflow in M6A; it does not restore the older generalized matching/review/acquisition architecture.
+>
+> **Current delivery status:** M4–M6 are implemented. M6A is the next planned milestone.
 
 ## 1. Planning principles
 
@@ -236,7 +238,7 @@ Given a supported missing Spotify track and an authorized source supported by th
 
 ## Deliverables
 
-Define the concrete authorized source input/workflow in the M6 spec. Do not introduce an automatic arbitrary search flow for copyrighted Spotify tracks.
+Accept an explicit Spotify track plus an authorized HTTP(S) source URL. Automatic source resolution is a separate M6A slice so the retrieval boundary is proven first.
 
 Keep `yt-dlp` behind a small internal process/interface boundary so command syntax does not leak through the application.
 
@@ -282,7 +284,93 @@ An authorized controlled source can turn a fixture missing track into an availab
 
 ---
 
-# 8. Milestone 7 — Desktop M3U8 Materialization
+# 8. Milestone 6A — YouTube Missing-Set Acquisition
+
+## Timebox
+
+**3–5 engineering days**
+
+## Objective
+
+Make the intended desktop acquisition workflow concrete:
+
+```bash
+offbeat spotify sync
+offbeat acquire missing
+```
+
+The second command durably queues every distinct supported Missing track, resolves one eligible YouTube URL per track, and sends resolved work through the existing M6 `yt-dlp` retrieval and managed-file publication path.
+
+## Deliverables
+
+Add daemon-backed commands equivalent to:
+
+```bash
+offbeat acquire missing
+offbeat acquire status [id]
+```
+
+`acquire missing` operates on committed Desired Spotify state and creates at most one active Acquisition work item per distinct track. It must enqueue the batch durably before returning so CLI disconnect or daemon restart does not lose the unprocessed remainder. Already available tracks and tracks with active work are skipped idempotently.
+
+Extend the minimal acquisition schema only as needed to distinguish direct-URL and YouTube-resolution work, persist the selected URL, and represent an `unresolved` outcome separately from tool/download failure. Do not add a generalized source graph, candidate history, confidence tiers, or review decisions.
+
+Implement one built-in YouTube resolver behind a small boundary. It should:
+
+- derive a deterministic query from Spotify title, artists, duration, and meaningful version markers;
+- inspect a bounded candidate set before downloading;
+- reject candidates with conflicting artist/title/version information or unacceptable duration difference;
+- select only a unique eligible best candidate;
+- leave no-result or ambiguous cases unresolved;
+- persist the selected canonical YouTube URL before invoking the existing downloader.
+
+The exact eligibility thresholds and tie rules belong in the M6A spec and fixture suite. They must favor unresolved over a predictably wrong recording. This is resolver-local source selection, not cross-track equivalence or library deduplication.
+
+Workers retain M6 bounded concurrency and failure isolation. Direct URL acquisition remains supported for unresolved tracks and other authorized sources. `acquire status` must make aggregate and per-work queued/running/unresolved/failed/complete outcomes inspectable.
+
+No live YouTube dependency is allowed in normal CI. Use a fake resolver with captured/synthetic result metadata and the existing fake/controlled downloader. A separately invoked manual or opt-in integration gate may exercise the real `yt-dlp` YouTube search/probe boundary.
+
+## Tests
+
+Prove at minimum:
+
+- all distinct Missing tracks are queued once despite duplicate playlist/Liked references;
+- available tracks and existing active work are skipped;
+- repeating the command is idempotent;
+- query construction is stable for the same Spotify metadata;
+- an exact unique candidate resolves and enters the existing download path;
+- no result, conflicting version markers, excessive duration difference, and a tied best result become unresolved;
+- one unresolved or failed track does not block unrelated tracks;
+- selected URLs and queued work survive daemon restart;
+- a track removed from Desired Spotify state before publication is not installed;
+- direct URL acquisition can supersede a completed unresolved outcome without creating competing active work;
+- batch/status responses remain bounded for a large missing set.
+
+## Out of scope
+
+- acquisition triggered automatically by `spotify sync`;
+- generalized resolver plugins or non-YouTube search backends;
+- library-wide fuzzy matching or cross-track asset deduplication;
+- high/medium/low confidence tiers;
+- persistent candidate lists or human review queues;
+- automatic retry/backoff policy beyond existing manual retry.
+
+## Completion gate
+
+With a deterministic Desired Spotify state and fake YouTube result catalog:
+
+```text
+offbeat acquire missing
+-> every eligible distinct missing track becomes durable work
+-> unique eligible candidates become managed files
+-> ambiguous/no-match tracks remain inspectably unresolved
+-> failures do not stop the rest of the batch
+```
+
+An opt-in real-tool smoke test must also resolve and download a user-authorized YouTube fixture without making normal CI depend on external media or YouTube availability.
+
+---
+
+# 9. Milestone 7 — Desktop M3U8 Materialization
 
 ## Timebox
 
@@ -335,7 +423,7 @@ At this point Offbeat should be useful as a desktop-only product. Use it before 
 
 ---
 
-# 9. Milestone 8 — One-Device Android Manual Sync
+# 10. Milestone 8 — One-Device Android Manual Sync
 
 ## Timebox
 
@@ -405,7 +493,7 @@ manual connect/authenticate
 
 ---
 
-# 10. Milestone 9 — Setup, Packaging, and Reliability
+# 11. Milestone 9 — Setup, Packaging, and Reliability
 
 ## Timebox
 
@@ -462,7 +550,7 @@ without source-code editing.
 
 ---
 
-# 11. Estimated remaining effort after M3
+# 12. Estimated remaining effort after M3
 
 Planning timeboxes:
 
@@ -471,21 +559,22 @@ Planning timeboxes:
 | M4 — current Spotify state | 2–3 days |
 | M5 — managed tracks/missing | 2–3 days |
 | M6 — minimal acquisition | 4–6 days |
+| M6A — YouTube missing-set acquisition | 3–5 days |
 | M7 — M3U8 | 1–2 days |
 | M8 — Android manual sync | 5–7 days |
 | M9 — setup/reliability | 4–7 days |
-| **Total** | **18–28 engineering days** |
+| **Total** | **21–33 engineering days** |
 
 These are scope-control estimates, not delivery promises. If a milestone exceeds its timebox, first check whether deferred architecture has been pulled back into scope.
 
-## 12. Deferred backlog after lean v1
+## 13. Deferred backlog after lean v1
 
 Do not schedule these automatically. Reconsider them from real usage:
 
 - historical revision/snapshot browsing;
 - richer sync history;
 - cross-track asset deduplication;
-- metadata matching and review;
+- library-wide metadata matching and review;
 - source-resolver plugin architecture;
 - sophisticated automatic retry/backoff;
 - automatic physical garbage collection;
