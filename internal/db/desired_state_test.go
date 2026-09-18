@@ -71,7 +71,9 @@ func TestCurrentStateSchemaConstrainsEntryRepresentation(t *testing.T) {
 	for _, query := range []string{
 		`INSERT INTO playlist_entries(playlist_uri, position, kind, track_uri) VALUES ('spotify:playlist:one', 0, 'supported', NULL)`,
 		`INSERT INTO playlist_entries(playlist_uri, position, kind, track_uri) VALUES ('spotify:playlist:one', 0, 'unsupported', 'spotify:track:missing')`,
+		`INSERT INTO playlist_entries(playlist_uri, position, kind, source_uri) VALUES ('spotify:playlist:one', 0, 'unsupported', '')`,
 		`INSERT INTO liked_entries(position, kind, track_uri) VALUES (0, 'other', NULL)`,
+		`INSERT INTO spotify_tracks(uri, name, artists_json, album_uri, album_name, duration_ms) VALUES ('spotify:track:bad', 'Bad', '{}', 'spotify:album:bad', 'Bad', 1)`,
 	} {
 		if _, err := d.ExecContext(ctx, query); err == nil {
 			t.Fatalf("invalid entry insert succeeded: %s", query)
