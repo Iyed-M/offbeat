@@ -70,6 +70,21 @@ func (d *DB) IsDesiredTrack(ctx context.Context, uri string) (bool, error) {
 	return exists, err
 }
 
+// DesiredTrack returns current Spotify metadata for one supported track.
+func (d *DB) DesiredTrack(ctx context.Context, uri string) (desired.Track, error) {
+	var track desired.Track
+	var artists string
+	err := d.QueryRowContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms FROM spotify_tracks WHERE uri = ?`, uri).Scan(
+		&track.URI, &track.Name, &artists, &track.Album.URI, &track.Album.Name, &track.DurationMS)
+	if err != nil {
+		return desired.Track{}, err
+	}
+	if err := json.Unmarshal([]byte(artists), &track.Artists); err != nil {
+		return desired.Track{}, err
+	}
+	return track, nil
+}
+
 // RegisterManagedTrack retains at most one file per Spotify identity. It does
 // not change Desired Spotify state or its revision.
 func (d *DB) RegisterManagedTrack(ctx context.Context, uri, relativePath string) error {

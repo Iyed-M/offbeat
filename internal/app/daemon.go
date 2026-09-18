@@ -49,6 +49,7 @@ type Daemon struct {
 	managedFiles       *managed.Files
 	managedMu          sync.Mutex
 	retriever          acquisition.Retriever
+	resolver           acquisition.Resolver
 	acquisitionCancel  context.CancelFunc
 	acquisitionWorkers sync.WaitGroup
 	syntheticFixtures  bool
@@ -66,6 +67,8 @@ type Options struct {
 	EnableSyntheticFixtures bool
 	// Retriever overrides media retrieval for controlled acceptance tests.
 	Retriever acquisition.Retriever
+	// Resolver overrides YouTube selection for controlled acceptance tests.
+	Resolver acquisition.Resolver
 }
 
 var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
@@ -98,6 +101,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		livenessInterval:  10 * time.Second,
 		syntheticFixtures: opts.EnableSyntheticFixtures,
 		retriever:         opts.Retriever,
+		resolver:          opts.Resolver,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -143,6 +147,9 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 	logger.Info("database ready", "path", cfg.Paths.Database)
 	if d.retriever == nil {
 		d.retriever = acquisition.NewRetriever(cfg.Downloader)
+	}
+	if d.resolver == nil {
+		d.resolver = acquisition.NewYouTubeResolver(cfg.Downloader)
 	}
 
 	return d, nil
@@ -426,7 +433,7 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleConfig(ctx)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
-	case "acquire", "acquire.status", "acquire.retry":
+	case "acquire", "acquire.missing", "acquire.status", "acquire.retry":
 		return d.handleAcquisition(ctx, req)
 	case "missing":
 		return d.handleMissing(ctx, req.Missing)

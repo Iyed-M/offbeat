@@ -6,11 +6,11 @@ Offbeat mirrors Spotify playlists and Liked Songs into a managed local audio lib
 
 ## Current status
 
-Milestones 1–6 are implemented.
+Milestones 1–6A are implemented.
 
 The daemon, CLI, and Spicetify extension can collect and strictly validate a complete normalized candidate containing real playlists and Liked Songs through Spotify Desktop's authenticated Platform facade. Collection preserves ordering and duplicate occurrences and rejects incomplete required pages.
 
-The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. `offbeat acquire` queues explicit authorized media sources, retrieves audio through yt-dlp, and publishes managed files with restart-safe work. **Milestone 6A is next:** resolve and acquire the complete Missing track set through YouTube before desktop M3U8 materialization.
+The daemon atomically persists current Spotify desired state in SQLite. `offbeat missing` reports distinct supported desired tracks without a usable managed file. An opt-in synthetic-audio test seam exercises managed-file registration and availability. `offbeat acquire` supports both explicit authorized media URLs and restart-safe Missing-set acquisition through conservative YouTube resolution. **Milestone 7 is next:** desktop M3U8 materialization.
 
 On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now favors a current-state-first implementation over speculative historical revision, library-wide matching/review, asset-deduplication, and advanced Android-sync infrastructure. ADR-0011 restores the concrete YouTube Missing-set acquisition workflow without restoring those generalized systems.
 
@@ -87,10 +87,9 @@ See [`spicetify/offbeat/README.md`](spicetify/offbeat/README.md) for the manual 
 
 The authoritative roadmap is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
-Remaining milestones after M6:
+Remaining milestones after M6A:
 
 ```text
-M6A YouTube missing-set acquisition
 M7  desktop M3U8 materialization
 M8  one-device Android manual sync
 M9  setup, packaging, and reliability
@@ -142,9 +141,9 @@ offbeat acquire status 1
 offbeat acquire retry 1
 ```
 
-Submission declares that you are authorized to download the supplied source. The currently implemented command does not search for matches or obtain Spotify audio. HTTP(S) URLs are accepted; local paths, search expressions, embedded credentials, and fragments are rejected. Each request retrieves one item. Supported output formats are WAV, MP3, M4A, Opus, Ogg, FLAC, and AAC.
+Submission declares that you are authorized to download the supplied source. The direct track-and-URL form does not search for matches or obtain Spotify audio. HTTP(S) URLs are accepted; local paths, search expressions, embedded credentials, and fragments are rejected. Each request retrieves one item. Supported output formats are WAV, MP3, M4A, Opus, Ogg, FLAC, and AAC.
 
-Milestone 6A will add the intended batch workflow:
+The intended batch workflow is:
 
 ```bash
 offbeat spotify sync
@@ -152,9 +151,11 @@ offbeat acquire missing
 offbeat acquire status
 ```
 
-`acquire missing` will durably queue each distinct Missing track, resolve one eligible unambiguous YouTube result from its Spotify metadata, and reuse the existing acquisition workers. Ambiguous/no-result tracks will remain unresolved without blocking the rest; the explicit track-and-URL form will remain the override. This command is documented as planned and is not implemented yet.
+`acquire missing` atomically queues each distinct Missing track before returning and reuses the existing acquisition workers. Available tracks, active work, and tracks with a previous YouTube attempt are skipped idempotently. `offbeat acquire status` prints aggregate counts and paginates every work outcome over bounded Control responses; add an ID to inspect just one item.
 
-The submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `failed`, or `complete`. `retry` requeues failed work with the same source and ID. To correct the source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
+The built-in resolver inspects at most five yt-dlp YouTube search results. A candidate must contain the Spotify title tokens and primary artist, have the same meaningful version markers (such as live, remix, acoustic, or remaster), avoid known alternate-content markers, and be within the greater of five seconds or three percent of Spotify duration. A tied best result, no result, or any conflicting/ineligible result becomes `unresolved`; another track's work continues. The selected canonical YouTube URL is persisted before retrieval, so restart does not repeat a successful resolution. Direct URL acquisition remains the user-controlled override for an unresolved track.
+
+The direct submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `unresolved`, `failed`, or `complete`. `retry` requeues failed work with the same source and ID. To correct the source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
 
 Install yt-dlp, FFmpeg, and ffprobe separately. Their executable locations and the worker limit are configurable:
 
@@ -170,7 +171,7 @@ concurrency = 2
 
 Concurrency must be between 1 and 32. Restart the daemon to apply configuration changes. The older `temp_retry_backoff` and `max_temp_retries` configuration fields are retained for compatibility but unused; failures require manual retry. Tool failures are reported without reflecting source URLs or subprocess output. Check the source and configured tool installations before retrying.
 
-The daemon stores acquisition work in SQLite schema version 4 and requeues interrupted running work on startup. A failed track does not stop other workers. yt-dlp uses private temporary staging, ignores user configuration/plugins, and preserves native audio when possible; FFmpeg extracts audio when necessary. ffprobe checks the completed audio before publication. The daemon copies completed media into a managed temporary file, then atomically installs it and commits its mapping together with completion. A failed database commit may leave an unregistered complete file, which stays missing until a later successful acquisition. Abrupt termination can leave staging files in the system temporary directory; these are never registered as playable files.
+The daemon stores acquisition work in SQLite schema version 5 and requeues interrupted running work on startup. A failed or unresolved track does not stop other workers. yt-dlp uses private temporary staging, ignores user configuration/plugins, and preserves native audio when possible; FFmpeg extracts audio when necessary. ffprobe checks the completed audio before publication. The daemon copies completed media into a managed temporary file, then atomically installs it and commits its mapping together with completion. A failed database commit may leave an unregistered complete file, which stays missing until a later successful acquisition. Abrupt termination can leave staging files in the system temporary directory; these are never registered as playable files.
 
 A track removed from Desired Spotify state during retrieval is not published. Acquisition does not change the Spotify state revision. Playlist generation is M7.
 
@@ -178,6 +179,17 @@ The deterministic tests inject the retrieval boundary and cover failure isolatio
 
 ```bash
 OFFBEAT_TEST_REAL_TOOLS=1 go test ./internal/acquisition ./internal/app -run 'RealTools' -count=1 -v
+```
+
+To opt into the external YouTube resolution/download smoke test, supply metadata for a YouTube item you are authorized to download:
+
+```bash
+OFFBEAT_TEST_REAL_YOUTUBE=1 \
+OFFBEAT_TEST_YOUTUBE_TITLE='Fixture title' \
+OFFBEAT_TEST_YOUTUBE_ARTIST='Fixture artist' \
+OFFBEAT_TEST_YOUTUBE_DURATION_MS=123000 \
+OFFBEAT_TEST_YOUTUBE_ID='abcdefghijk' \
+go test ./internal/acquisition -run TestYouTubeResolverRealAuthorizedFixture -count=1 -v
 ```
 
 ## Planning workflow

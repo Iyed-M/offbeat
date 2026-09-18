@@ -19,6 +19,10 @@ type AcquisitionIDRequest struct {
 	ID int64 `json:"acquisition_id"`
 }
 
+type AcquisitionListRequest struct {
+	AfterID int64 `json:"after_id"`
+}
+
 // AcquisitionResult reports the durable acquisition identity and its current
 // state. Source URLs are deliberately not returned through the Control API.
 type AcquisitionResult struct {
@@ -26,6 +30,29 @@ type AcquisitionResult struct {
 	TrackURI string `json:"track_uri"`
 	State    string `json:"state"`
 	Error    string `json:"error,omitempty"`
+}
+
+// AcquisitionBatchResult is bounded regardless of Missing-set size.
+type AcquisitionBatchResult struct {
+	Considered       int `json:"considered"`
+	Queued           int `json:"queued"`
+	SkippedActive    int `json:"skipped_active"`
+	SkippedAttempted int `json:"skipped_attempted"`
+	Available        int `json:"available"`
+}
+
+type AcquisitionCountsResult struct {
+	Pending    int `json:"pending"`
+	Running    int `json:"running"`
+	Unresolved int `json:"unresolved"`
+	Failed     int `json:"failed"`
+	Complete   int `json:"complete"`
+}
+
+type AcquisitionStatusResult struct {
+	Counts      AcquisitionCountsResult `json:"counts"`
+	Work        []AcquisitionResult     `json:"work"`
+	NextAfterID int64                   `json:"next_after_id,omitempty"`
 }
 
 // ValidateAcquisitionTrackURI accepts a normalized Spotify track URI. It

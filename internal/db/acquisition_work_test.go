@@ -176,6 +176,85 @@ func TestRetryAcquisitionRejectsNewerActiveWorkAndOversizedFailure(t *testing.T)
 	}
 }
 
+func TestMissingAcquisitionBatchIsAtomicAndIdempotent(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	one, two := acquisitionTrack("spotify:track:one"), acquisitionTrack("spotify:track:two")
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, desired.Candidate{LikedSongs: []desired.CandidateEntry{
+		{Kind: desired.EntrySupported, Track: &one},
+		{Position: 1, Kind: desired.EntrySupported, Track: &two},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	batch, err := d.EnqueueMissingAcquisitions(ctx, []string{one.URI, two.URI})
+	if err != nil || batch.Queued != 2 || batch.Considered != 2 {
+		t.Fatalf("batch = %#v, %v", batch, err)
+	}
+	claimed, err := d.ClaimAcquisition(ctx)
+	if err != nil || claimed.SourceKind != AcquisitionSourceYouTube || claimed.SourceURL != "" {
+		t.Fatalf("claimed = %#v, %v", claimed, err)
+	}
+	if err := d.UnresolveAcquisition(ctx, claimed.ID, "ambiguous"); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := d.EnqueueMissingAcquisitions(ctx, []string{one.URI, two.URI})
+	if err != nil || again.Queued != 0 || again.SkippedAttempted != 1 || again.SkippedActive != 1 {
+		t.Fatalf("idempotent batch = %#v, %v", again, err)
+	}
+	direct, err := d.EnqueueAcquisition(ctx, one.URI, "https://authorized.example/override")
+	if err != nil || direct.SourceKind != AcquisitionSourceDirect {
+		t.Fatalf("direct override = %#v, %v", direct, err)
+	}
+	counts, err := d.AcquisitionCounts(ctx)
+	if err != nil || counts.Pending != 2 || counts.Unresolved != 1 {
+		t.Fatalf("counts = %#v, %v", counts, err)
+	}
+
+	if _, err := d.EnqueueMissingAcquisitions(ctx, []string{one.URI, "spotify:track:absent"}); !errors.Is(err, ErrAcquisitionPrecondition) {
+		t.Fatalf("atomic invalid batch error = %v", err)
+	}
+	var youtubeForOne int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM acquisition_work WHERE track_uri = ? AND source_kind = ?`, one.URI, AcquisitionSourceYouTube).Scan(&youtubeForOne); err != nil || youtubeForOne != 1 {
+		t.Fatalf("partial batch persisted: count=%d err=%v", youtubeForOne, err)
+	}
+}
+
+func TestYouTubeAcquisitionMigrationPreservesDirectWork(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.ExecContext(ctx, MigrationsTableSchema); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := LoadMigrations(nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:4] {
+		if err := d.applyOne(ctx, migration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	track := acquisitionTrack("spotify:track:one")
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, desired.Candidate{LikedSongs: []desired.CandidateEntry{{Kind: desired.EntrySupported, Track: &track}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_url, state, error, created_at, updated_at) VALUES (?, ?, 'pending', '', 'before', 'before')`, track.URI, "https://authorized.example/one"); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || len(applied) != 1 || applied[0] != 5 {
+		t.Fatalf("migration = %v, %v", applied, err)
+	}
+	work, err := d.Acquisition(ctx, 1)
+	if err != nil || work.SourceKind != AcquisitionSourceDirect || work.SourceURL != "https://authorized.example/one" || work.State != AcquisitionPending {
+		t.Fatalf("migrated work = %#v, %v", work, err)
+	}
+}
+
 func acquisitionTrack(uri string) desired.Track {
 	return desired.Track{URI: uri, Name: "One", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
@@ -20,8 +21,6 @@ func (d *Daemon) handleAcquisition(ctx context.Context, req ipc.Request) (any, e
 	if d.DB == nil || d.managedFiles == nil {
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "managed library not ready")
 	}
-	var work db.AcquisitionWork
-	var err error
 	switch req.Command {
 	case "acquire":
 		if req.Acquire == nil {
@@ -36,35 +35,98 @@ func (d *Daemon) handleAcquisition(ctx context.Context, req ipc.Request) (any, e
 		if err := d.requireMissingTrack(ctx, req.Acquire.TrackURI); err != nil {
 			return nil, err
 		}
-		work, err = d.DB.EnqueueAcquisition(ctx, req.Acquire.TrackURI, req.Acquire.SourceURL)
-	case "acquire.status":
-		if req.AcquisitionStatus == nil || req.AcquisitionStatus.ID < 1 {
-			return nil, ipc.NewError(ipc.CodeInvalidRequest, "status requires acquisition_id")
+		work, err := d.DB.EnqueueAcquisition(ctx, req.Acquire.TrackURI, req.Acquire.SourceURL)
+		if err != nil {
+			return nil, d.acquisitionError(err)
 		}
-		work, err = d.DB.Acquisition(ctx, req.AcquisitionStatus.ID)
+		return acquisitionResult(work), nil
+	case "acquire.missing":
+		tracks, err := d.DB.DesiredManagedTracks(ctx)
+		if err != nil {
+			return nil, d.acquisitionError(err)
+		}
+		missing := make([]string, 0, len(tracks))
+		available := 0
+		for _, track := range tracks {
+			if d.managedFiles.Available(track.Track.URI, track.RelativePath) {
+				available++
+			} else {
+				missing = append(missing, track.Track.URI)
+			}
+		}
+		batch, err := d.DB.EnqueueMissingAcquisitions(ctx, missing)
+		if err != nil {
+			return nil, d.acquisitionError(err)
+		}
+		return ipc.AcquisitionBatchResult{Considered: batch.Considered, Queued: batch.Queued, SkippedActive: batch.SkippedActive, SkippedAttempted: batch.SkippedAttempted, Available: available}, nil
+	case "acquire.status":
+		if req.AcquisitionStatus == nil {
+			counts, err := d.DB.AcquisitionCounts(ctx)
+			if err != nil {
+				return nil, d.acquisitionError(err)
+			}
+			after := int64(0)
+			if req.AcquisitionList != nil {
+				after = req.AcquisitionList.AfterID
+			}
+			const pageSize = 128
+			work, err := d.DB.AcquisitionsAfter(ctx, after, pageSize+1)
+			if err != nil {
+				return nil, d.acquisitionError(err)
+			}
+			result := ipc.AcquisitionStatusResult{Counts: ipc.AcquisitionCountsResult{Pending: counts.Pending, Running: counts.Running, Unresolved: counts.Unresolved, Failed: counts.Failed, Complete: counts.Complete}, Work: []ipc.AcquisitionResult{}}
+			if len(work) > pageSize {
+				result.NextAfterID = work[pageSize-1].ID
+				work = work[:pageSize]
+			}
+			for _, item := range work {
+				result.Work = append(result.Work, acquisitionResult(item))
+			}
+			encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: result})
+			if err != nil || len(encoded) > ipc.MaxMessageBytes {
+				return nil, ipc.NewError(ipc.CodeInternal, "acquisition status page exceeds the Control protocol response limit")
+			}
+			return result, nil
+		}
+		if req.AcquisitionStatus.ID < 1 {
+			return nil, ipc.NewError(ipc.CodeInvalidRequest, "status requires a positive acquisition_id")
+		}
+		work, err := d.DB.Acquisition(ctx, req.AcquisitionStatus.ID)
+		if err != nil {
+			return nil, d.acquisitionError(err)
+		}
+		return acquisitionResult(work), nil
 	case "acquire.retry":
 		if req.AcquisitionRetry == nil || req.AcquisitionRetry.ID < 1 {
 			return nil, ipc.NewError(ipc.CodeInvalidRequest, "retry requires acquisition_id")
 		}
-		work, err = d.DB.Acquisition(ctx, req.AcquisitionRetry.ID)
+		work, err := d.DB.Acquisition(ctx, req.AcquisitionRetry.ID)
 		if err == nil {
 			if err := d.requireMissingTrack(ctx, work.TrackURI); err != nil {
 				return nil, err
 			}
 			work, err = d.DB.RetryAcquisition(ctx, work.ID)
 		}
+		if err != nil {
+			return nil, d.acquisitionError(err)
+		}
+		return acquisitionResult(work), nil
 	}
+	return nil, ipc.NewError(ipc.CodeInvalidRequest, "unknown acquisition command")
+}
+
+func (d *Daemon) acquisitionError(err error) error {
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ipc.NewError(ipc.CodeFailedPrecondition, "acquisition not found")
+			return ipc.NewError(ipc.CodeFailedPrecondition, "acquisition not found")
 		}
 		if errors.Is(err, db.ErrAcquisitionConflict) || errors.Is(err, db.ErrAcquisitionPrecondition) {
-			return nil, ipc.NewError(ipc.CodeFailedPrecondition, "acquisition conflicts with existing work or is not eligible for this operation")
+			return ipc.NewError(ipc.CodeFailedPrecondition, "acquisition conflicts with existing work or is not eligible for this operation")
 		}
 		d.Logger.Error("acquisition request failed")
-		return nil, ipc.NewError(ipc.CodeInternal, "could not update or read acquisition work")
+		return ipc.NewError(ipc.CodeInternal, "could not update or read acquisition work")
 	}
-	return acquisitionResult(work), nil
+	return nil
 }
 
 func (d *Daemon) requireMissingTrack(ctx context.Context, uri string) error {
@@ -142,6 +204,31 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	if err != nil {
 		fail("track is no longer desired or missing")
 		return
+	}
+	if work.SourceKind == db.AcquisitionSourceYouTube && work.SourceURL == "" {
+		track, err := d.DB.DesiredTrack(ctx, work.TrackURI)
+		if err != nil {
+			fail("track is no longer desired")
+			return
+		}
+		selected, err := d.resolver.Resolve(ctx, track)
+		if errors.Is(err, acquisition.ErrUnresolved) {
+			if ctx.Err() == nil {
+				if recordErr := d.DB.UnresolveAcquisition(ctx, work.ID, "no unique eligible YouTube result"); recordErr != nil {
+					d.Logger.Error("could not record unresolved acquisition", "acquisition_id", work.ID)
+				}
+			}
+			return
+		}
+		if err != nil {
+			fail("YouTube resolution failed; check configured yt-dlp, then retry")
+			return
+		}
+		if err := d.DB.SetAcquisitionSource(ctx, work.ID, selected); err != nil {
+			fail("could not persist selected YouTube source")
+			return
+		}
+		work.SourceURL = selected
 	}
 	media, err := d.retriever.Retrieve(ctx, work.SourceURL)
 	if err != nil {

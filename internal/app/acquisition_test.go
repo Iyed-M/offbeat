@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,6 +25,12 @@ type retrieveFunc func(context.Context, string) (*acquisition.Media, error)
 
 func (f retrieveFunc) Retrieve(ctx context.Context, url string) (*acquisition.Media, error) {
 	return f(ctx, url)
+}
+
+type resolveFunc func(context.Context, desired.Track) (string, error)
+
+func (f resolveFunc) Resolve(ctx context.Context, track desired.Track) (string, error) {
+	return f(ctx, track)
 }
 
 func acquisitionDaemon(t *testing.T, home string, retrieve acquisition.Retriever, concurrency int) *Daemon {
@@ -111,6 +118,24 @@ func waitAcquisition(t *testing.T, d *Daemon, id int64, state string) ipc.Acquis
 	return ipc.AcquisitionResult{}
 }
 
+func acquireBatchControl(t *testing.T, d *Daemon) ipc.AcquisitionBatchResult {
+	t.Helper()
+	raw, err := ipc.Encode(ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := sendRaw(t, SocketPath(d.socketDir), append(raw, '\n'))
+	if response.Error != nil {
+		t.Fatalf("acquire missing: %v", response.Error)
+	}
+	data, _ := json.Marshal(response.Result)
+	var result ipc.AcquisitionBatchResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func fakeMedia(t *testing.T) (*acquisition.Media, error) {
 	// Retrieval tests validate actual audio. This injected boundary supplies a
 	// completed regular file to exercise daemon ownership/publication behavior.
@@ -167,6 +192,99 @@ func TestAcquisitionSuccessFailureIsolationAndRetry(t *testing.T) {
 	if len(missing.Tracks) != 0 || missing.AvailableCount != 2 || missing.StateRevision != 1 {
 		t.Fatalf("final missing: %#v", missing)
 	}
+}
+
+func TestYouTubeMissingSetResolutionIsolationAndDirectOverride(t *testing.T) {
+	retriever := retrieveFunc(func(ctx context.Context, url string) (*acquisition.Media, error) {
+		if strings.Contains(url, "three") {
+			return nil, errors.New("controlled failure")
+		}
+		return fakeMedia(t)
+	})
+	home, err := os.MkdirTemp("", "offbeat-m6a-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retriever, 2)
+	d.resolver = resolveFunc(func(_ context.Context, track desired.Track) (string, error) {
+		switch track.Name {
+		case "two":
+			return "", acquisition.ErrUnresolved
+		case "three":
+			return "https://www.youtube.com/watch?v=three000000", nil
+		default:
+			return "https://www.youtube.com/watch?v=one00000000", nil
+		}
+	})
+	seedAcquisitionTracks(t, d, "one", "two", "three")
+	runAcquisitionDaemon(t, d)
+	batch := acquireBatchControl(t, d)
+	if batch.Queued != 3 || batch.Considered != 3 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	ids := make(map[string]int64)
+	for _, name := range []string{"one", "two", "three"} {
+		var id int64
+		if err := d.DB.QueryRowContext(context.Background(), `SELECT id FROM acquisition_work WHERE track_uri = ?`, "spotify:track:"+name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = id
+	}
+	waitAcquisition(t, d, ids["one"], "complete")
+	waitAcquisition(t, d, ids["two"], "unresolved")
+	waitAcquisition(t, d, ids["three"], "failed")
+	for id, want := range map[int64]string{ids["one"]: "https://www.youtube.com/watch?v=one00000000", ids["three"]: "https://www.youtube.com/watch?v=three000000"} {
+		work, err := d.DB.Acquisition(context.Background(), id)
+		if err != nil || work.SourceURL != want {
+			t.Fatalf("work %d = %#v, %v", id, work, err)
+		}
+	}
+	again := acquireBatchControl(t, d)
+	if again.Queued != 0 || again.SkippedAttempted != 2 || again.Available != 1 {
+		t.Fatalf("repeat = %#v", again)
+	}
+	override := acquireControl(t, d, ipc.Request{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:two", SourceURL: "https://fixture.test/override"}})
+	waitAcquisition(t, d, override.ID, "complete")
+}
+
+func TestSelectedYouTubeURLSurvivesRestart(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-m6a-restart-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	started := make(chan struct{})
+	d := acquisitionDaemon(t, home, retrieveFunc(func(ctx context.Context, _ string) (*acquisition.Media, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}), 1)
+	d.resolver = resolveFunc(func(context.Context, desired.Track) (string, error) {
+		return "https://www.youtube.com/watch?v=restart0000", nil
+	})
+	seedAcquisitionTracks(t, d, "one")
+	stop := runAcquisitionDaemon(t, d)
+	if batch := acquireBatchControl(t, d); batch.Queued != 1 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("retrieval did not start")
+	}
+	work, err := d.DB.Acquisition(context.Background(), 1)
+	if err != nil || work.SourceURL != "https://www.youtube.com/watch?v=restart0000" {
+		t.Fatalf("selected work = %#v, %v", work, err)
+	}
+	stop()
+
+	d = acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) { return fakeMedia(t) }), 1)
+	d.resolver = resolveFunc(func(context.Context, desired.Track) (string, error) {
+		return "", errors.New("resolver must not run again")
+	})
+	runAcquisitionDaemon(t, d)
+	waitAcquisition(t, d, work.ID, "complete")
 }
 
 func TestAcquisitionBoundedConcurrencyAndRestart(t *testing.T) {
