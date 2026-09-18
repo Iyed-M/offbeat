@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
+	"github.com/Iyed-M/offbeat/internal/desired"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
 
@@ -62,6 +64,32 @@ database = "`+dbPath+`"
 	}
 	if strings.Contains(string(logs), testAdapterCredential) {
 		t.Fatal("daemon log contains adapter credential")
+	}
+}
+
+func TestNewDaemonReopensCommittedDesiredSpotifyState(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDaemon(context.Background(), Options{HomeDir: dir, AdapterCredential: testAdapterCredential})
+	if err != nil {
+		t.Fatalf("first NewDaemon: %v", err)
+	}
+	candidate := desired.Candidate{Playlists: []desired.CandidatePlaylist{}, LikedSongs: []desired.CandidateEntry{{Position: 0, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:one"}}}
+	metadata, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), candidate)
+	if err != nil {
+		t.Fatalf("apply desired state: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close first daemon: %v", err)
+	}
+
+	d, err = NewDaemon(context.Background(), Options{HomeDir: dir, AdapterCredential: testAdapterCredential})
+	if err != nil {
+		t.Fatalf("reopen daemon: %v", err)
+	}
+	defer d.Close()
+	state, reopenedMetadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil || reopenedMetadata.Revision != metadata.Revision || reopenedMetadata.LastCommittedAt == nil || !reopenedMetadata.LastCommittedAt.Equal(*metadata.LastCommittedAt) || len(state.Playlists) != 0 || !reflect.DeepEqual(state.LikedSongs, []desired.Entry{{Position: 0, Kind: desired.EntryUnsupported, SourceURI: "spotify:episode:one"}}) {
+		t.Fatalf("reopened state = %#v metadata %#v err %v", state, reopenedMetadata, err)
 	}
 }
 

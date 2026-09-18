@@ -55,6 +55,38 @@ func TestSpotifySyncCompletesOnlyForMatchingCandidateResponse(t *testing.T) {
 	}
 }
 
+func TestSpotifySyncReconcilesChangedAndEquivalentCandidates(t *testing.T) {
+	d := startAdapterDaemon(t)
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+
+	first := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeCandidateResponse(t, adapter, requestID)
+	result := decodeSyncResult(t, syncResponse(t, <-first))
+	if !result.Changed || result.StateRevision != 1 {
+		t.Fatalf("first result = %#v", result)
+	}
+
+	second := sendSync(t, d)
+	requestID = assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeCandidateResponse(t, adapter, requestID)
+	result = decodeSyncResult(t, syncResponse(t, <-second))
+	if result.Changed || result.StateRevision != 1 {
+		t.Fatalf("equivalent result = %#v", result)
+	}
+
+	third := sendSync(t, d)
+	requestID = assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{"position": 0, "kind": "unsupported", "source_uri": "spotify:episode:one"}}}},
+	})
+	result = decodeSyncResult(t, syncResponse(t, <-third))
+	if !result.Changed || result.StateRevision != 2 || result.LikedSongsEntryCount != 1 || result.UnsupportedEntryOccurrences != 1 {
+		t.Fatalf("changed result = %#v", result)
+	}
+}
+
 func TestSpotifySyncSanitizesPersistenceFailureAndRollsBack(t *testing.T) {
 	d := startAdapterDaemon(t)
 	if _, err := d.DB.Exec(`CREATE TRIGGER fail_liked_entry BEFORE INSERT ON liked_entries BEGIN SELECT RAISE(ABORT, 'raw sqlite failure'); END`); err != nil {
