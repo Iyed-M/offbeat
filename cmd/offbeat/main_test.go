@@ -92,7 +92,7 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 		"pid           :",
 		"started_at    :",
 		"database      : ready",
-		"schema version 3",
+		"schema version 4",
 		"Spotify adapter: disconnected",
 		"socket        :",
 	} {
@@ -147,14 +147,7 @@ func TestCLIStatusUsesBootstrapConfigWhenDaemonConfigBecomesInvalid(t *testing.T
 
 func writeCLIAdapterConfig(t *testing.T, home string) string {
 	t.Helper()
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve adapter port: %v", err)
-	}
-	port := reserved.Addr().(*net.TCPAddr).Port
-	if err := reserved.Close(); err != nil {
-		t.Fatalf("release adapter port: %v", err)
-	}
+	port := reserveCLIAdapterPort(t)
 	configPath := filepath.Join(home, ".config", "offbeat", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -163,6 +156,19 @@ func writeCLIAdapterConfig(t *testing.T, home string) string {
 		t.Fatalf("write adapter config: %v", err)
 	}
 	return configPath
+}
+
+func reserveCLIAdapterPort(t *testing.T) int {
+	t.Helper()
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve adapter port: %v", err)
+	}
+	port := reserved.Addr().(*net.TCPAddr).Port
+	if err := reserved.Close(); err != nil {
+		t.Fatalf("release adapter port: %v", err)
+	}
+	return port
 }
 
 func TestCLISpotifySyncPrintsCandidateSuccess(t *testing.T) {
@@ -341,19 +347,49 @@ func TestCLIStatusRejectsExtraPositionalArgs(t *testing.T) {
 	}
 }
 
+func TestCLIAcquireRejectsInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing arguments", args: []string{"acquire"}},
+		{name: "too many arguments", args: []string{"acquire", "spotify:track:one", "https://media.example.test/one.mp3", "extra"}},
+		{name: "invalid track URI", args: []string{"acquire", "spotify:playlist:one", "https://media.example.test/one.mp3"}},
+		{name: "invalid source", args: []string{"acquire", "spotify:track:one", "search terms"}},
+		{name: "status id is invalid", args: []string{"acquire", "status", "zero"}},
+		{name: "retry id is invalid", args: []string{"acquire", "retry", "0"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errOut, err := runCLI(t, t.TempDir(), tt.args[0], tt.args[1:]...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("exit = %v, want code 2; stdout=%q stderr=%q", err, out, errOut)
+			}
+			if out != "" || errOut == "" {
+				t.Fatalf("stdout=%q stderr=%q", out, errOut)
+			}
+		})
+	}
+}
+
 func TestCLIConfigServesDaemonEffectiveConfig(t *testing.T) {
 	home := t.TempDir()
+	port := reserveCLIAdapterPort(t)
 	cfgPath := filepath.Join(home, ".config", "offbeat", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgPath, []byte(`
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 [acquisition]
 concurrency = 4
 
 [downloader]
 yt_dlp_path = "/usr/local/bin/yt-dlp"
-`), 0o600); err != nil {
+
+[spotify_adapter]
+port = %d
+`, port)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -406,17 +442,21 @@ yt_dlp_path = "/usr/local/bin/yt-dlp"
 // (the value loaded at startup), not the freshly-written file.
 func TestCLIConfigReflectsDaemonWhenLocalFileChanges(t *testing.T) {
 	home := t.TempDir()
+	port := reserveCLIAdapterPort(t)
 	cfgPath := filepath.Join(home, ".config", "offbeat", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgPath, []byte(`
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
 [acquisition]
 concurrency = 4
 
 [downloader]
 yt_dlp_path = "/original/yt-dlp"
-`), 0o600); err != nil {
+
+[spotify_adapter]
+port = %d
+`, port)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

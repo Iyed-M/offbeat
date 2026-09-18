@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
@@ -47,6 +48,9 @@ type Daemon struct {
 	livenessInterval   time.Duration
 	managedFiles       *managed.Files
 	managedMu          sync.Mutex
+	retriever          acquisition.Retriever
+	acquisitionCancel  context.CancelFunc
+	acquisitionWorkers sync.WaitGroup
 	syntheticFixtures  bool
 }
 
@@ -60,6 +64,8 @@ type Options struct {
 	// EnableSyntheticFixtures enables the in-process development/test seam only.
 	// It is deliberately not exposed by offbeatd flags or the Control protocol.
 	EnableSyntheticFixtures bool
+	// Retriever overrides media retrieval for controlled acceptance tests.
+	Retriever acquisition.Retriever
 }
 
 var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
@@ -91,6 +97,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		livenessWindow:    30 * time.Second,
 		livenessInterval:  10 * time.Second,
 		syntheticFixtures: opts.EnableSyntheticFixtures,
+		retriever:         opts.Retriever,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -134,6 +141,9 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		return nil, d.closeAfterError(fmt.Errorf("migrate database: %w", err))
 	}
 	logger.Info("database ready", "path", cfg.Paths.Database)
+	if d.retriever == nil {
+		d.retriever = acquisition.NewRetriever(cfg.Downloader)
+	}
 
 	return d, nil
 }
@@ -180,6 +190,7 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
+	d.stopAcquisitionWork()
 	d.stopAdapterWork()
 	if d.adapterServer != nil {
 		if err := d.adapterServer.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -277,6 +288,14 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		return d.shutdown(err)
 	}
 
+	if err := d.startAcquisitionWork(ctx); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(SocketPath(d.socketDir))
+		if ctx.Err() != nil {
+			return d.shutdown(nil)
+		}
+		return d.shutdown(fmt.Errorf("start acquisition: %w", err))
+	}
 	d.Logger.Info("offbeatd ready", "socket", SocketPath(d.socketDir))
 
 	var acceptErr error
@@ -407,6 +426,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleConfig(ctx)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
+	case "acquire", "acquire.status", "acquire.retry":
+		return d.handleAcquisition(ctx, req)
 	case "missing":
 		return d.handleMissing(ctx, req.Missing)
 	default:

@@ -120,6 +120,63 @@ func TestManagedPublicationIsConfinedAndAtomic(t *testing.T) {
 	}
 }
 
+func TestPublishCopiesOnlyValidatedStagedMedia(t *testing.T) {
+	root, staging := t.TempDir(), t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	stagedPath := filepath.Join(staging, "source.mp3")
+	if err := os.WriteFile(stagedPath, []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := os.Open(stagedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staged.Close()
+	uri := "spotify:track:published"
+	published, err := files.Publish(uri, staged, "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published != managed.TrackPath(uri, "mp3") || !files.Available(uri, published) {
+		t.Fatalf("published = %q, available=%v", published, files.Available(uri, published))
+	}
+	if got, err := os.ReadFile(filepath.Join(root, published)); err != nil || !bytes.Equal(got, []byte("audio")) {
+		t.Fatalf("published content = %q, %v", got, err)
+	}
+	replacementPath := filepath.Join(staging, "replacement.mp3")
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Open(replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if _, err := files.Publish(uri, replacement, "mp3"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, published)); err != nil || !bytes.Equal(got, []byte("replacement")) {
+		t.Fatalf("replacement content = %q, %v", got, err)
+	}
+	for _, extension := range []string{"", "exe", "MP3"} {
+		if _, err := files.Publish(uri, staged, extension); err == nil {
+			t.Fatalf("accepted extension %q", extension)
+		}
+	}
+	empty, err := os.CreateTemp(staging, "empty-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer empty.Close()
+	if _, err := files.Publish(uri, empty, "mp3"); err == nil {
+		t.Fatal("accepted empty staged file")
+	}
+}
+
 func TestManagedRootRejectsSymlinkDirectories(t *testing.T) {
 	for _, name := range []string{"tracks", "playlists"} {
 		t.Run(name, func(t *testing.T) {
