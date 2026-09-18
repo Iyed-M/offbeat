@@ -20,7 +20,7 @@ func TestReadDesiredSpotifyStateReturnsExactCurrentState(t *testing.T) {
 	trackTwo := desired.Track{URI: "spotify:track:two", Name: "Two", Artists: []desired.NamedURI{{URI: "spotify:artist:two", Name: "Artist Two"}}, Album: desired.NamedURI{URI: "spotify:album:two", Name: "Album Two"}, DurationMS: 2000}
 	insertTrack(t, d, trackOne)
 	insertTrack(t, d, trackTwo)
-	if _, err := d.ExecContext(ctx, `INSERT INTO playlists(uri, name, rootlist_position) VALUES ('spotify:playlist:two', 'Two', 1), ('spotify:playlist:one', 'One', 0)`); err != nil {
+	if _, err := d.ExecContext(ctx, `INSERT INTO playlists(uri, name, position) VALUES ('spotify:playlist:two', 'Two', 1), ('spotify:playlist:one', 'One', 0)`); err != nil {
 		t.Fatalf("insert playlists: %v", err)
 	}
 	if _, err := d.ExecContext(ctx, `INSERT INTO playlist_entries(playlist_uri, position, kind, track_uri, source_uri) VALUES
@@ -57,6 +57,25 @@ func TestReadDesiredSpotifyStateReturnsExactCurrentState(t *testing.T) {
 	if metadata.Revision != 7 || metadata.LastCommittedAt == nil || !metadata.LastCommittedAt.Equal(committed) {
 		t.Fatalf("metadata = %#v", metadata)
 	}
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	got, metadata, err = readDesiredSpotifyState(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("read desired state in transaction: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit transaction: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("transaction state = %#v, want %#v", got, want)
+	}
+	if metadata.Revision != 7 || metadata.LastCommittedAt == nil || !metadata.LastCommittedAt.Equal(committed) {
+		t.Fatalf("transaction metadata = %#v", metadata)
+	}
 }
 
 func TestCurrentStateSchemaConstrainsEntryRepresentation(t *testing.T) {
@@ -65,7 +84,7 @@ func TestCurrentStateSchemaConstrainsEntryRepresentation(t *testing.T) {
 	if _, err := d.Migrate(ctx, nil, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := d.ExecContext(ctx, `INSERT INTO playlists(uri, name, rootlist_position) VALUES ('spotify:playlist:one', 'One', 0)`); err != nil {
+	if _, err := d.ExecContext(ctx, `INSERT INTO playlists(uri, name, position) VALUES ('spotify:playlist:one', 'One', 0)`); err != nil {
 		t.Fatalf("insert playlist: %v", err)
 	}
 	for _, query := range []string{

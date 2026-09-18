@@ -10,15 +10,38 @@ import (
 	"github.com/Iyed-M/offbeat/internal/desired"
 )
 
+type stateQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 // ReadDesiredSpotifyState returns the complete current Desired Spotify state.
 func (d *DB) ReadDesiredSpotifyState(ctx context.Context) (desired.State, desired.Metadata, error) {
+	tx, err := d.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return desired.State{}, desired.Metadata{}, fmt.Errorf("begin desired state read: %w", err)
+	}
+	defer tx.Rollback()
+	state, metadata, err := readDesiredSpotifyState(ctx, tx)
+	if err != nil {
+		return desired.State{}, desired.Metadata{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return desired.State{}, desired.Metadata{}, fmt.Errorf("commit desired state read: %w", err)
+	}
+	return state, metadata, nil
+}
+
+// readDesiredSpotifyState reads from one query source, including a caller's
+// existing write transaction when current state must be compared before apply.
+func readDesiredSpotifyState(ctx context.Context, q stateQuerier) (desired.State, desired.Metadata, error) {
 	state := desired.State{Tracks: []desired.Track{}, Playlists: []desired.Playlist{}, LikedSongs: []desired.Entry{}}
-	metadata, err := d.readStateMetadata(ctx)
+	metadata, err := readStateMetadata(ctx, q)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, err
 	}
 
-	rows, err := d.QueryContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms FROM spotify_tracks ORDER BY uri`)
+	rows, err := q.QueryContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms FROM spotify_tracks ORDER BY uri`)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("query tracks: %w", err)
 	}
@@ -41,7 +64,7 @@ func (d *DB) ReadDesiredSpotifyState(ctx context.Context) (desired.State, desire
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("close tracks: %w", err)
 	}
 
-	playlists, err := d.QueryContext(ctx, `SELECT uri, name, rootlist_position FROM playlists ORDER BY rootlist_position`)
+	playlists, err := q.QueryContext(ctx, `SELECT uri, name, position FROM playlists ORDER BY position`)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("query playlists: %w", err)
 	}
@@ -60,24 +83,24 @@ func (d *DB) ReadDesiredSpotifyState(ctx context.Context) (desired.State, desire
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("close playlists: %w", err)
 	}
 	for _, playlist := range playlistRows {
-		playlist.Entries, err = d.readEntries(ctx, `SELECT position, kind, track_uri, source_uri FROM playlist_entries WHERE playlist_uri = ? ORDER BY position`, playlist.URI)
+		playlist.Entries, err = readEntries(ctx, q, `SELECT position, kind, track_uri, source_uri FROM playlist_entries WHERE playlist_uri = ? ORDER BY position`, playlist.URI)
 		if err != nil {
 			return desired.State{}, desired.Metadata{}, fmt.Errorf("read playlist %q entries: %w", playlist.URI, err)
 		}
 		state.Playlists = append(state.Playlists, playlist)
 	}
 
-	state.LikedSongs, err = d.readEntries(ctx, `SELECT position, kind, track_uri, source_uri FROM liked_entries ORDER BY position`)
+	state.LikedSongs, err = readEntries(ctx, q, `SELECT position, kind, track_uri, source_uri FROM liked_entries ORDER BY position`)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("read liked entries: %w", err)
 	}
 	return state, metadata, nil
 }
 
-func (d *DB) readStateMetadata(ctx context.Context) (desired.Metadata, error) {
+func readStateMetadata(ctx context.Context, q stateQuerier) (desired.Metadata, error) {
 	var metadata desired.Metadata
 	var committed sql.NullString
-	if err := d.QueryRowContext(ctx, `SELECT revision, last_committed_at FROM state_metadata WHERE singleton_id = 1`).Scan(&metadata.Revision, &committed); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT revision, last_committed_at FROM state_metadata WHERE singleton_id = 1`).Scan(&metadata.Revision, &committed); err != nil {
 		return desired.Metadata{}, fmt.Errorf("query state metadata: %w", err)
 	}
 	if committed.Valid {
@@ -90,8 +113,8 @@ func (d *DB) readStateMetadata(ctx context.Context) (desired.Metadata, error) {
 	return metadata, nil
 }
 
-func (d *DB) readEntries(ctx context.Context, query string, args ...any) ([]desired.Entry, error) {
-	rows, err := d.QueryContext(ctx, query, args...)
+func readEntries(ctx context.Context, q stateQuerier, query string, args ...any) ([]desired.Entry, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

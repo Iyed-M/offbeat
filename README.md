@@ -21,9 +21,8 @@ On 2026-09-17 the post-M3 v1 roadmap was simplified by ADR-0010. The project now
 | Daemon | `cmd/offbeatd` | lifecycle, Control protocol, Adapter endpoint/session, candidate validation |
 | CLI | `cmd/offbeat` | `status`, `config`, and `spotify sync` requests |
 | Spicetify extension | `spicetify/offbeat` | complete normalized playlist + Liked Songs collection |
-| Domain | `internal/domain` | foundational typed IDs/value types; future skeleton types are not binding architecture |
 | Config | `internal/config` | TOML configuration/defaults |
-| DB | `internal/db` | SQLite ownership + migration runner; product schema begins in M4 |
+| DB | `internal/db` | SQLite ownership, migrations, and current Desired Spotify state reads |
 | Logging | `internal/logging` | `log/slog` wrapper |
 
 ## Build and test

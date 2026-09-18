@@ -8,9 +8,9 @@ CREATE TABLE spotify_tracks (
 );
 
 CREATE TABLE playlists (
-    uri               TEXT PRIMARY KEY,
-    name              TEXT NOT NULL,
-    rootlist_position INTEGER NOT NULL UNIQUE CHECK (rootlist_position >= 0)
+    uri      TEXT PRIMARY KEY,
+    name     TEXT NOT NULL,
+    position INTEGER NOT NULL UNIQUE CHECK (position >= 0)
 );
 
 CREATE TABLE playlist_entries (
