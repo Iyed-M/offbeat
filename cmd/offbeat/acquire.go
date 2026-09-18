@@ -21,6 +21,67 @@ func runAcquire(configPath, homeDir, trackURI, sourceURL string) int {
 	return runAcquisitionRequest(configPath, homeDir, "acquire", &ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: trackURI, SourceURL: sourceURL}})
 }
 
+func runAcquireMissing(configPath, homeDir string) int {
+	return runAcquisitionSummaryRequest(configPath, homeDir, "acquire missing", ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.missing"})
+}
+
+func runAcquireStatusAll(configPath, homeDir string) int {
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat acquire status: config: %v\n", err)
+		return 1
+	}
+	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.status"}
+	first := true
+	for {
+		resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, controlReadTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "offbeat acquire status: daemon-unavailable: %v\n", err)
+			return 1
+		}
+		if resp.Error != nil {
+			fmt.Fprintf(os.Stderr, "offbeat acquire status: daemon error: %s: %s\n", resp.Error.Code, resp.Error.Message)
+			return 1
+		}
+		if resp.Version != ipc.ProtocolVersion {
+			fmt.Fprintf(os.Stderr, "offbeat acquire status: unexpected daemon reply: unsupported protocol version %d\n", resp.Version)
+			return 1
+		}
+		raw, _ := ipc.Encode(resp.Result)
+		var result ipc.AcquisitionStatusResult
+		if err := ipc.Decode(raw, &result); err != nil {
+			fmt.Fprintln(os.Stderr, "offbeat acquire status: unexpected daemon reply")
+			return 1
+		}
+		if result.Counts.Pending < 0 || result.Counts.Running < 0 || result.Counts.Unresolved < 0 || result.Counts.Failed < 0 || result.Counts.Complete < 0 {
+			fmt.Fprintln(os.Stderr, "offbeat acquire status: unexpected daemon reply")
+			return 1
+		}
+		if first {
+			fmt.Fprintf(os.Stdout, "Acquisitions: %d pending, %d running, %d unresolved, %d failed, %d complete.\n", result.Counts.Pending, result.Counts.Running, result.Counts.Unresolved, result.Counts.Failed, result.Counts.Complete)
+			first = false
+		}
+		for _, work := range result.Work {
+			if work.ID <= 0 || ipc.ValidateAcquisitionTrackURI(work.TrackURI) != nil || !validAcquisitionState(work.State) {
+				fmt.Fprintln(os.Stderr, "offbeat acquire status: unexpected daemon reply")
+				return 1
+			}
+			fmt.Fprintf(os.Stdout, "Acquisition %d: %s (%s).\n", work.ID, work.State, work.TrackURI)
+			if work.Error != "" {
+				fmt.Fprintf(os.Stdout, "Error: %s\n", work.Error)
+			}
+		}
+		if result.NextAfterID == 0 {
+			return 0
+		}
+		if len(result.Work) == 0 || result.NextAfterID != result.Work[len(result.Work)-1].ID {
+			fmt.Fprintln(os.Stderr, "offbeat acquire status: unexpected daemon reply")
+			return 1
+		}
+		req.AcquisitionList = &ipc.AcquisitionListRequest{AfterID: result.NextAfterID}
+	}
+}
+
 func runAcquireStatus(configPath, homeDir, rawID string) int {
 	return runAcquisitionByID(configPath, homeDir, rawID, "acquire.status")
 }
@@ -75,6 +136,38 @@ func runAcquisitionRequest(configPath, homeDir, label string, req *ipc.Request) 
 	return 0
 }
 
+func runAcquisitionSummaryRequest(configPath, homeDir, label string, req ipc.Request) int {
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
+		return 1
+	}
+	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, controlReadTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
+		return 1
+	}
+	if resp.Error != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
+		return 1
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
+		return 1
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		return 1
+	}
+	var result ipc.AcquisitionBatchResult
+	if err := ipc.Decode(raw, &result); err != nil || result.Considered < 0 || result.Queued < 0 || result.SkippedActive < 0 || result.SkippedAttempted < 0 || result.Available < 0 || result.Queued+result.SkippedActive+result.SkippedAttempted != result.Considered {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "Missing acquisition: %d queued, %d active, %d previously attempted, %d available.\n", result.Queued, result.SkippedActive, result.SkippedAttempted, result.Available)
+	return 0
+}
+
 func decodeAcquisitionResult(result any) (ipc.AcquisitionResult, error) {
 	raw, err := ipc.Encode(result)
 	if err != nil {
@@ -92,7 +185,7 @@ func decodeAcquisitionResult(result any) (ipc.AcquisitionResult, error) {
 
 func validAcquisitionState(state string) bool {
 	switch state {
-	case "pending", "running", "failed", "complete":
+	case "pending", "running", "unresolved", "failed", "complete":
 		return true
 	default:
 		return false

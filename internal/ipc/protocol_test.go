@@ -85,6 +85,24 @@ func TestDecodeAcquisitionRequests(t *testing.T) {
 			},
 		},
 		{
+			name:    "aggregate status",
+			payload: `{"version":1,"command":"acquire.status"}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionStatus != nil {
+					t.Fatalf("AcquisitionStatus = %#v", req.AcquisitionStatus)
+				}
+			},
+		},
+		{
+			name:    "aggregate status continuation",
+			payload: `{"version":1,"command":"acquire.status","acquisition_list":{"after_id":128}}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionList == nil || req.AcquisitionList.AfterID != 128 {
+					t.Fatalf("AcquisitionList = %#v", req.AcquisitionList)
+				}
+			},
+		},
+		{
 			name:    "retry",
 			payload: `{"version":1,"command":"acquire.retry","acquisition_retry":{"acquisition_id":42}}`,
 			check: func(t *testing.T, req ipc.Request) {
@@ -116,7 +134,6 @@ func TestDecodeRejectsInvalidAcquisitionRequestShapes(t *testing.T) {
 		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3#fragment"}}`,
 		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3","extra":true}}`,
 		`{"version":1,"command":"status","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3"}}`,
-		`{"version":1,"command":"acquire.status"}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":null}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":{}}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":0}}`,
@@ -151,6 +168,18 @@ func TestEncodeProducesNoNewline(t *testing.T) {
 	}
 	if strings.Contains(string(data), "\n") {
 		t.Fatalf("Encode appended newline: %q", data)
+	}
+}
+
+func TestAcquisitionSummariesStayBoundedForLargeLibraries(t *testing.T) {
+	for _, result := range []any{
+		ipc.AcquisitionBatchResult{Considered: 1_000_000, Queued: 900_000, SkippedActive: 50_000, SkippedAttempted: 50_000, Available: 2_000_000},
+		ipc.AcquisitionCountsResult{Pending: 1_000_000, Running: 32, Unresolved: 500_000, Failed: 500_000, Complete: 2_000_000},
+	} {
+		encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: result})
+		if err != nil || len(encoded) >= ipc.MaxMessageBytes {
+			t.Fatalf("bounded result: bytes=%d err=%v", len(encoded), err)
+		}
 	}
 }
 

@@ -57,12 +57,13 @@ type Request struct {
 	// version field. It lets the dispatcher distinguish an invalid request
 	// from an explicitly unsupported version.
 	versionSet        bool
-	Version           int                   `json:"version"`
-	Command           string                `json:"command"`
-	Missing           *MissingRequest       `json:"missing,omitempty"`
-	Acquire           *AcquireRequest       `json:"acquire,omitempty"`
-	AcquisitionStatus *AcquisitionIDRequest `json:"acquisition_status,omitempty"`
-	AcquisitionRetry  *AcquisitionIDRequest `json:"acquisition_retry,omitempty"`
+	Version           int                     `json:"version"`
+	Command           string                  `json:"command"`
+	Missing           *MissingRequest         `json:"missing,omitempty"`
+	Acquire           *AcquireRequest         `json:"acquire,omitempty"`
+	AcquisitionStatus *AcquisitionIDRequest   `json:"acquisition_status,omitempty"`
+	AcquisitionList   *AcquisitionListRequest `json:"acquisition_list,omitempty"`
+	AcquisitionRetry  *AcquisitionIDRequest   `json:"acquisition_retry,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -74,7 +75,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_status" && name != "acquisition_retry" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -151,15 +152,26 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	var acquisitionList *AcquisitionListRequest
+	if raw, ok := fields["acquisition_list"]; ok {
+		if parsedCommand != "acquire.status" || isJSONNull(raw) || acquisitionStatus != nil {
+			return errors.New("acquisition_list arguments are only valid for aggregate acquire.status requests")
+		}
+		var parsed AcquisitionListRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if parsed.AfterID <= 0 {
+			return errors.New("after_id must be a positive integer")
+		}
+		acquisitionList = &parsed
+	}
 	acquisitionRetry, err := parseAcquisitionID("acquisition_retry", "acquire.retry")
 	if err != nil {
 		return err
 	}
 	if parsedCommand == "acquire" && acquire == nil {
 		return errors.New("acquire request requires acquire arguments")
-	}
-	if parsedCommand == "acquire.status" && acquisitionStatus == nil {
-		return errors.New("acquire.status request requires acquisition_status arguments")
 	}
 	if parsedCommand == "acquire.retry" && acquisitionRetry == nil {
 		return errors.New("acquire.retry request requires acquisition_retry arguments")
@@ -171,6 +183,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	r.Missing = missing
 	r.Acquire = acquire
 	r.AcquisitionStatus = acquisitionStatus
+	r.AcquisitionList = acquisitionList
 	r.AcquisitionRetry = acquisitionRetry
 	return nil
 }

@@ -4,7 +4,7 @@
 >
 > **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. ADR-0011 adds only the concrete YouTube missing-set workflow in M6A; it does not restore the older generalized matching/review/acquisition architecture.
 >
-> **Current delivery status:** M4–M6 are implemented. M6A is the next planned milestone.
+> **Current delivery status:** M4–M6A are implemented. M7 is the next planned milestone.
 
 ## 1. Planning principles
 

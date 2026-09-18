@@ -11,8 +11,11 @@ import (
 const (
 	AcquisitionPending       = "pending"
 	AcquisitionRunning       = "running"
+	AcquisitionUnresolved    = "unresolved"
 	AcquisitionFailed        = "failed"
 	AcquisitionComplete      = "complete"
+	AcquisitionSourceDirect  = "direct"
+	AcquisitionSourceYouTube = "youtube"
 	maxAcquisitionErrorBytes = 1024
 )
 
@@ -28,13 +31,29 @@ var (
 // AcquisitionWork is the restart-safe record for one daemon-owned retrieval.
 // Timestamps are stored and returned in RFC3339Nano UTC form.
 type AcquisitionWork struct {
-	ID        int64
-	TrackURI  string
-	SourceURL string
-	State     string
-	Error     string
-	CreatedAt string
-	UpdatedAt string
+	ID         int64
+	TrackURI   string
+	SourceKind string
+	SourceURL  string
+	State      string
+	Error      string
+	CreatedAt  string
+	UpdatedAt  string
+}
+
+type AcquisitionBatch struct {
+	Considered       int
+	Queued           int
+	SkippedActive    int
+	SkippedAttempted int
+}
+
+type AcquisitionCounts struct {
+	Pending    int `json:"pending"`
+	Running    int `json:"running"`
+	Unresolved int `json:"unresolved"`
+	Failed     int `json:"failed"`
+	Complete   int `json:"complete"`
 }
 
 // EnqueueAcquisition adds an authorized source request for a currently desired
@@ -75,7 +94,7 @@ func (d *DB) EnqueueAcquisition(ctx context.Context, trackURI, sourceURL string)
 	}
 
 	now := acquisitionTime()
-	result, err := tx.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_url, state, error, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)`, trackURI, sourceURL, AcquisitionPending, now, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_kind, source_url, state, error, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, ?)`, trackURI, AcquisitionSourceDirect, sourceURL, AcquisitionPending, now, now)
 	if err != nil {
 		return AcquisitionWork{}, fmt.Errorf("insert acquisition work: %w", err)
 	}
@@ -94,9 +113,92 @@ func (d *DB) EnqueueAcquisition(ctx context.Context, trackURI, sourceURL string)
 	return work, nil
 }
 
+// EnqueueMissingAcquisitions atomically creates one built-in YouTube
+// resolution request for each supplied Missing track that has never had one.
+// Existing active work and prior YouTube outcomes are idempotently skipped.
+func (d *DB) EnqueueMissingAcquisitions(ctx context.Context, trackURIs []string) (AcquisitionBatch, error) {
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return AcquisitionBatch{}, fmt.Errorf("begin enqueue missing acquisitions: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	result := AcquisitionBatch{Considered: len(trackURIs)}
+	for _, trackURI := range trackURIs {
+		if err := requireDesiredTrack(ctx, tx, trackURI); err != nil {
+			return AcquisitionBatch{}, err
+		}
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acquisition_work WHERE track_uri = ? AND state IN (?, ?))`, trackURI, AcquisitionPending, AcquisitionRunning).Scan(&active); err != nil {
+			return AcquisitionBatch{}, fmt.Errorf("check active acquisition: %w", err)
+		}
+		if active {
+			result.SkippedActive++
+			continue
+		}
+		var attempted bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acquisition_work WHERE track_uri = ? AND source_kind = ?)`, trackURI, AcquisitionSourceYouTube).Scan(&attempted); err != nil {
+			return AcquisitionBatch{}, fmt.Errorf("check previous YouTube acquisition: %w", err)
+		}
+		if attempted {
+			result.SkippedAttempted++
+			continue
+		}
+		now := acquisitionTime()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_kind, source_url, state, error, created_at, updated_at) VALUES (?, ?, NULL, ?, '', ?, ?)`, trackURI, AcquisitionSourceYouTube, AcquisitionPending, now, now); err != nil {
+			return AcquisitionBatch{}, fmt.Errorf("insert YouTube acquisition work: %w", err)
+		}
+		result.Queued++
+	}
+	if err := tx.Commit(); err != nil {
+		return AcquisitionBatch{}, fmt.Errorf("commit missing acquisitions: %w", err)
+	}
+	committed = true
+	return result, nil
+}
+
 // Acquisition reads a persisted acquisition record by its durable ID.
 func (d *DB) Acquisition(ctx context.Context, id int64) (AcquisitionWork, error) {
 	return acquisition(ctx, d, id)
+}
+
+func (d *DB) AcquisitionCounts(ctx context.Context) (AcquisitionCounts, error) {
+	var counts AcquisitionCounts
+	err := d.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(state = 'pending'), 0), COALESCE(SUM(state = 'running'), 0),
+		COALESCE(SUM(state = 'unresolved'), 0), COALESCE(SUM(state = 'failed'), 0),
+		COALESCE(SUM(state = 'complete'), 0) FROM acquisition_work`).Scan(
+		&counts.Pending, &counts.Running, &counts.Unresolved, &counts.Failed, &counts.Complete)
+	if err != nil {
+		return AcquisitionCounts{}, fmt.Errorf("count acquisition work: %w", err)
+	}
+	return counts, nil
+}
+
+func (d *DB) AcquisitionsAfter(ctx context.Context, afterID int64, limit int) ([]AcquisitionWork, error) {
+	rows, err := d.QueryContext(ctx, `SELECT id, track_uri, source_kind, source_url, state, error, created_at, updated_at FROM acquisition_work WHERE id > ? ORDER BY id LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list acquisition work: %w", err)
+	}
+	defer rows.Close()
+	work := make([]AcquisitionWork, 0, limit)
+	for rows.Next() {
+		var item AcquisitionWork
+		var sourceURL sql.NullString
+		if err := rows.Scan(&item.ID, &item.TrackURI, &item.SourceKind, &sourceURL, &item.State, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.SourceURL = sourceURL.String
+		work = append(work, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return work, nil
 }
 
 // ClaimAcquisition atomically changes the oldest pending work to running.
@@ -203,6 +305,34 @@ func (d *DB) FailAcquisition(ctx context.Context, id int64, message string) erro
 	return d.transitionAcquisition(ctx, id, AcquisitionRunning, AcquisitionFailed, message)
 }
 
+// SetAcquisitionSource persists a resolver-selected URL before retrieval.
+func (d *DB) SetAcquisitionSource(ctx context.Context, id int64, sourceURL string) error {
+	if sourceURL == "" {
+		return fmt.Errorf("%w: selected source URL is required", ErrAcquisitionPrecondition)
+	}
+	result, err := d.ExecContext(ctx, `UPDATE acquisition_work SET source_url = ?, updated_at = ? WHERE id = ? AND source_kind = ? AND state = ? AND source_url IS NULL`, sourceURL, acquisitionTime(), id, AcquisitionSourceYouTube, AcquisitionRunning)
+	if err != nil {
+		return fmt.Errorf("persist selected YouTube source: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("%w: acquisition %d cannot accept a selected source", ErrAcquisitionPrecondition, id)
+	}
+	return nil
+}
+
+// UnresolveAcquisition records the expected terminal outcome where no unique
+// eligible candidate was found.
+func (d *DB) UnresolveAcquisition(ctx context.Context, id int64, message string) error {
+	if message == "" || len(message) > maxAcquisitionErrorBytes {
+		return fmt.Errorf("%w: unresolved message is invalid", ErrAcquisitionPrecondition)
+	}
+	return d.transitionAcquisition(ctx, id, AcquisitionRunning, AcquisitionUnresolved, message)
+}
+
 // CompleteAcquisition atomically records both the managed-track mapping and
 // terminal work state. The track must still be currently desired.
 func (d *DB) CompleteAcquisition(ctx context.Context, id int64, relativePath string) error {
@@ -256,7 +386,9 @@ type acquisitionQuerier interface {
 
 func acquisition(ctx context.Context, q acquisitionQuerier, id int64) (AcquisitionWork, error) {
 	var work AcquisitionWork
-	err := q.QueryRowContext(ctx, `SELECT id, track_uri, source_url, state, error, created_at, updated_at FROM acquisition_work WHERE id = ?`, id).Scan(&work.ID, &work.TrackURI, &work.SourceURL, &work.State, &work.Error, &work.CreatedAt, &work.UpdatedAt)
+	var sourceURL sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT id, track_uri, source_kind, source_url, state, error, created_at, updated_at FROM acquisition_work WHERE id = ?`, id).Scan(&work.ID, &work.TrackURI, &work.SourceKind, &sourceURL, &work.State, &work.Error, &work.CreatedAt, &work.UpdatedAt)
+	work.SourceURL = sourceURL.String
 	if err != nil {
 		return AcquisitionWork{}, err
 	}
@@ -268,7 +400,9 @@ func acquisitionByTrackAndStates(ctx context.Context, q acquisitionQuerier, trac
 		panic("acquisitionByTrackAndStates requires exactly two states")
 	}
 	var work AcquisitionWork
-	err := q.QueryRowContext(ctx, `SELECT id, track_uri, source_url, state, error, created_at, updated_at FROM acquisition_work WHERE track_uri = ? AND state IN (?, ?) ORDER BY id LIMIT 1`, trackURI, states[0], states[1]).Scan(&work.ID, &work.TrackURI, &work.SourceURL, &work.State, &work.Error, &work.CreatedAt, &work.UpdatedAt)
+	var sourceURL sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT id, track_uri, source_kind, source_url, state, error, created_at, updated_at FROM acquisition_work WHERE track_uri = ? AND state IN (?, ?) ORDER BY id LIMIT 1`, trackURI, states[0], states[1]).Scan(&work.ID, &work.TrackURI, &work.SourceKind, &sourceURL, &work.State, &work.Error, &work.CreatedAt, &work.UpdatedAt)
+	work.SourceURL = sourceURL.String
 	if err != nil {
 		return AcquisitionWork{}, err
 	}

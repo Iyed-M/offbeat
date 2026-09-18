@@ -32,7 +32,7 @@ func TestManagedMappingConstraintsAndRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{3, 4}) {
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{3, 4, 5}) {
 		t.Fatalf("M4 upgrade = %v %v", applied, err)
 	}
 	if err := d.RegisterManagedTrack(ctx, one.URI, "tracks/one.wav"); err != nil {

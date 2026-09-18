@@ -25,6 +25,12 @@ func (f cliRetrieveFunc) Retrieve(ctx context.Context, sourceURL string) (*acqui
 	return f(ctx, sourceURL)
 }
 
+type cliResolveFunc func(context.Context, desired.Track) (string, error)
+
+func (f cliResolveFunc) Resolve(ctx context.Context, track desired.Track) (string, error) {
+	return f(ctx, track)
+}
+
 func TestDecodeAcquisitionResultRejectsInvalidDaemonReply(t *testing.T) {
 	for _, result := range []any{
 		nil,
@@ -111,6 +117,27 @@ func TestCLIAcquisitionCompletesWithInjectedRetriever(t *testing.T) {
 	}
 }
 
+func TestCLIAcquireMissingAndAggregateStatus(t *testing.T) {
+	home := t.TempDir()
+	d, stop := startCLIAcquisitionDaemon(t, home, cliRetrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return nil, errors.New("controlled retrieval failure")
+	}), cliResolveFunc(func(context.Context, desired.Track) (string, error) {
+		return "", acquisition.ErrUnresolved
+	}))
+	defer stop()
+	seedCLIAcquisitionTrack(t, d, "one")
+
+	out, stderr, err := runCLI(t, home, "acquire", "missing")
+	if err != nil || stderr != "" || out != "Missing acquisition: 1 queued, 0 active, 0 previously attempted, 0 available.\n" {
+		t.Fatalf("acquire missing = stdout %q stderr %q err %v", out, stderr, err)
+	}
+	waitCLIAcquisitionState(t, d, 1, "unresolved")
+	out, stderr, err = runCLI(t, home, "acquire", "status")
+	if err != nil || stderr != "" || out != "Acquisitions: 0 pending, 0 running, 1 unresolved, 0 failed, 0 complete.\nAcquisition 1: unresolved (spotify:track:one).\nError: no unique eligible YouTube result\n" {
+		t.Fatalf("aggregate status = stdout %q stderr %q err %v", out, stderr, err)
+	}
+}
+
 func TestCLIAcquireDoesNotRetryUnknownOutcome(t *testing.T) {
 	home := t.TempDir()
 	socketDir := filepath.Join(home, "control")
@@ -155,7 +182,7 @@ func TestCLIAcquireDoesNotRetryUnknownOutcome(t *testing.T) {
 	}
 }
 
-func startCLIAcquisitionDaemon(t *testing.T, home string, retriever acquisition.Retriever) (*app.Daemon, func()) {
+func startCLIAcquisitionDaemon(t *testing.T, home string, retriever acquisition.Retriever, resolver ...acquisition.Resolver) (*app.Daemon, func()) {
 	t.Helper()
 	port := reserveCLIAdapterPort(t)
 	configPath := filepath.Join(home, ".config", "offbeat", "config.toml")
@@ -165,7 +192,11 @@ func startCLIAcquisitionDaemon(t *testing.T, home string, retriever acquisition.
 	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("[spotify_adapter]\nport = %d\n", port)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d, err := app.NewDaemon(context.Background(), app.Options{HomeDir: home, AdapterCredential: "test-credential", Retriever: retriever})
+	options := app.Options{HomeDir: home, AdapterCredential: "test-credential", Retriever: retriever}
+	if len(resolver) > 0 {
+		options.Resolver = resolver[0]
+	}
+	d, err := app.NewDaemon(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
