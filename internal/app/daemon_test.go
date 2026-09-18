@@ -301,6 +301,9 @@ func TestRunAdapterListenerIsReadyBeforeControlSocket(t *testing.T) {
 
 func assertResourcesReleased(t *testing.T, d *Daemon) {
 	t.Helper()
+	if d.managedFiles != nil {
+		t.Fatal("managed root was not closed")
+	}
 	if d.DB != nil {
 		t.Fatal("database was not closed")
 	}
@@ -316,7 +319,7 @@ func assertResourcesReleased(t *testing.T, d *Daemon) {
 	}
 }
 
-func TestEnsureDirsCreatesExpectedPaths(t *testing.T) {
+func TestEnsureDirsCreatesInfrastructurePaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Defaults(dir)
 	cfg.Paths.DataDir = filepath.Join(dir, "data")
@@ -335,9 +338,6 @@ func TestEnsureDirsCreatesExpectedPaths(t *testing.T) {
 		cfg.Paths.CertsDir,
 		filepath.Dir(cfg.Paths.Database),
 		filepath.Dir(cfg.Paths.LogFile),
-		cfg.Paths.MusicRoot,
-		filepath.Join(cfg.Paths.MusicRoot, "tracks"),
-		filepath.Join(cfg.Paths.MusicRoot, "playlists"),
 	} {
 		if _, err := os.Stat(want); err != nil {
 			t.Fatalf("missing dir %s: %v", want, err)
@@ -400,8 +400,8 @@ func TestStatusCommandReportsDaemonIdentity(t *testing.T) {
 	if !status.DBReady {
 		t.Error("DBReady=false want true")
 	}
-	if status.SchemaVersion != 2 {
-		t.Errorf("SchemaVersion=%d want 2", status.SchemaVersion)
+	if status.SchemaVersion != 3 {
+		t.Errorf("SchemaVersion=%d want 3", status.SchemaVersion)
 	}
 	if status.StartedAt.IsZero() {
 		t.Error("StartedAt is zero")

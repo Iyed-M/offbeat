@@ -77,6 +77,10 @@ func requestControl(sockPath, command string) (ipc.Response, error) {
 }
 
 func requestControlWithTimeout(sockPath, command string, readTimeout time.Duration) (ipc.Response, error) {
+	return requestControlMessage(sockPath, ipc.Request{Version: ipc.ProtocolVersion, Command: command}, readTimeout)
+}
+
+func requestControlMessage(sockPath string, req ipc.Request, readTimeout time.Duration) (ipc.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), controlConnectTimeout)
 	defer cancel()
 
@@ -91,7 +95,6 @@ func requestControlWithTimeout(sockPath, command string, readTimeout time.Durati
 		return ipc.Response{}, fmt.Errorf("set deadline: %w", err)
 	}
 
-	req := ipc.Request{Version: ipc.ProtocolVersion, Command: command}
 	data, err := ipc.Encode(req)
 	if err != nil {
 		return ipc.Response{}, fmt.Errorf("encode request: %w", err)

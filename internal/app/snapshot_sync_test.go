@@ -349,6 +349,9 @@ func TestObsoleteAdapterSessionCannotSatisfyLaterSync(t *testing.T) {
 	d := startAdapterDaemon(t)
 	endpoint := AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port)
 	old := authenticateAdapter(t, endpoint)
+	// hello.accepted is written before the server installs the active session.
+	// Wait for installation before capturing/removing its pointer.
+	waitForAdapterConnected(t, d, true)
 
 	// Simulate the old transport being removed before its handler finishes.
 	// Its pointer must remain incapable of completing work for the replacement.

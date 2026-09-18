@@ -55,6 +55,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runSpotifySync(configPath, homeDir))
+	case "missing":
+		if len(rest) > 0 {
+			fmt.Fprintln(os.Stderr, "offbeat: 'missing' takes no arguments")
+			os.Exit(2)
+		}
+		os.Exit(runMissing(configPath, homeDir))
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "run 'offbeat -help' for usage")
@@ -63,7 +69,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println("offbeat - Offbeat CLI (M1)")
+	fmt.Println("offbeat - Offbeat CLI")
 	fmt.Println()
 	fmt.Println("Usage: offbeat [flags] <command>")
 	fmt.Println()
@@ -74,6 +80,7 @@ func printHelp() {
 	fmt.Println("  status    report daemon/database status through the control socket")
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
+	fmt.Println("  missing       list supported desired tracks without a managed file")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }

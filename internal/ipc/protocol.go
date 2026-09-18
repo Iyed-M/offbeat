@@ -57,8 +57,9 @@ type Request struct {
 	// version field. It lets the dispatcher distinguish an invalid request
 	// from an explicitly unsupported version.
 	versionSet bool
-	Version    int    `json:"version"`
-	Command    string `json:"command"`
+	Version    int             `json:"version"`
+	Command    string          `json:"command"`
+	Missing    *MissingRequest `json:"missing,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -70,7 +71,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" {
+		if name != "version" && name != "command" && name != "missing" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -92,10 +93,28 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(command, &parsedCommand); err != nil {
 		return fmt.Errorf("decode command: %w", err)
 	}
+	var missing *MissingRequest
+	if raw, ok := fields["missing"]; ok {
+		if parsedCommand != "missing" || isJSONNull(raw) {
+			return errors.New("missing arguments are only valid for missing requests")
+		}
+		var page struct {
+			AfterURI      string `json:"after_uri"`
+			StateRevision *int64 `json:"state_revision"`
+		}
+		if err := Decode(raw, &page); err != nil {
+			return err
+		}
+		if page.AfterURI == "" || page.StateRevision == nil || *page.StateRevision < 0 {
+			return errors.New("missing continuation requires after_uri and non-negative state_revision")
+		}
+		missing = &MissingRequest{AfterURI: page.AfterURI, StateRevision: *page.StateRevision}
+	}
 
 	r.versionSet = true
 	r.Version = parsedVersion
 	r.Command = parsedCommand
+	r.Missing = missing
 	return nil
 }
 

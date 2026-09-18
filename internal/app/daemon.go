@@ -16,6 +16,7 @@ import (
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/logging"
+	"github.com/Iyed-M/offbeat/internal/managed"
 	"github.com/coder/websocket"
 )
 
@@ -44,6 +45,9 @@ type Daemon struct {
 	snapshotTimeout    time.Duration
 	livenessWindow     time.Duration
 	livenessInterval   time.Duration
+	managedFiles       *managed.Files
+	managedMu          sync.Mutex
+	syntheticFixtures  bool
 }
 
 type Options struct {
@@ -53,6 +57,9 @@ type Options struct {
 	// AdapterCredential is development/test-provisioned secret material. M12
 	// will replace this source with setup-managed secret storage.
 	AdapterCredential string
+	// EnableSyntheticFixtures enables the in-process development/test seam only.
+	// It is deliberately not exposed by offbeatd flags or the Control protocol.
+	EnableSyntheticFixtures bool
 }
 
 var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
@@ -83,10 +90,15 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		snapshotTimeout:   m3SnapshotTimeout,
 		livenessWindow:    30 * time.Second,
 		livenessInterval:  10 * time.Second,
+		syntheticFixtures: opts.EnableSyntheticFixtures,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
 		return nil, d.closeAfterError(err)
+	}
+	d.managedFiles, err = managed.Open(cfg.Paths.MusicRoot)
+	if err != nil {
+		return nil, d.closeAfterError(fmt.Errorf("open managed root: %w", err))
 	}
 
 	lvl, err := logging.ParseLevel(cfg.Logging.Level)
@@ -140,9 +152,6 @@ func ensureDirs(cfg config.Config) error {
 		{cfg.Paths.CertsDir, 0o700},
 		{filepath.Dir(cfg.Paths.Database), 0o755},
 		{filepath.Dir(cfg.Paths.LogFile), 0o755},
-		{cfg.Paths.MusicRoot, 0o755},
-		{filepath.Join(cfg.Paths.MusicRoot, "tracks"), 0o755},
-		{filepath.Join(cfg.Paths.MusicRoot, "playlists"), 0o755},
 	}
 	for _, d := range dirs {
 		if d.path == "" {
@@ -193,6 +202,12 @@ func (d *Daemon) releaseResources() error {
 			errs = append(errs, fmt.Errorf("close database: %w", err))
 		}
 		d.DB = nil
+	}
+	if d.managedFiles != nil {
+		if err := d.managedFiles.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close managed root: %w", err))
+		}
+		d.managedFiles = nil
 	}
 	if d.lock != nil {
 		if err := d.lock.Release(); err != nil {
@@ -392,6 +407,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleConfig(ctx)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
+	case "missing":
+		return d.handleMissing(ctx, req.Missing)
 	default:
 		return nil, ipc.NewError(ipc.CodeInvalidRequest,
 			fmt.Sprintf("unknown command %q", req.Command))
