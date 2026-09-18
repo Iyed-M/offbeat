@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output" ]; then out="$2"; shift 2; continue; fi
   shift
 done
-out="${out/%.%(ext)s/.mp3}"
+out="${out%.%(ext)s}.mp3"
 printf audio > "$out"
 `)
 	ffprobe := writeTool(t, tools, "ffprobe", "printf '%s\\n' '{\"streams\":[{\"codec_type\":\"audio\",\"disposition\":{\"attached_pic\":0}}]}'")
@@ -55,13 +55,13 @@ func TestRetrieveRejectsBadOrMultipleOutput(t *testing.T) {
 		{"multiple", `
 out=""
 while [ "$#" -gt 0 ]; do if [ "$1" = "--output" ]; then out="$2"; shift 2; continue; fi; shift; done
-printf x > "${out/%.%(ext)s/.mp3}"
-printf x > "${out/%.%(ext)s/.ogg}"
+printf x > "${out%.%(ext)s}.mp3"
+printf x > "${out%.%(ext)s}.ogg"
 `},
 		{"partial", `
 out=""
 while [ "$#" -gt 0 ]; do if [ "$1" = "--output" ]; then out="$2"; shift 2; continue; fi; shift; done
-printf x > "${out/%.%(ext)s/.part}"
+printf x > "${out%.%(ext)s}.part"
 `},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
