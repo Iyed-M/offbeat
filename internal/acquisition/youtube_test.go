@@ -82,9 +82,218 @@ printf '%%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Massive Attack - Teardr
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "--no-config\n--no-plugin-dirs\n--dump-single-json\n--playlist-end\n5\n--no-warnings\n--\nytsearch5:Massive Attack - Teardrop\n"
+	want := "--no-config\n--no-plugin-dirs\n--flat-playlist\n--dump-single-json\n--playlist-end\n10\n--no-warnings\n--\nytsearch10:Massive Attack - Teardrop\n"
 	if string(args) != want {
 		t.Fatalf("args = %q, want %q", args, want)
+	}
+}
+
+func TestSelectYouTubeCandidateExplainsMissingCandidates(t *testing.T) {
+	_, err := selectYouTubeCandidate(youtubeTrack("Teardrop", 330_000), nil)
+	var diagnostic *ResolutionDiagnostic
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("error = %v, want ResolutionDiagnostic", err)
+	}
+	if !errors.Is(err, ErrUnresolved) || diagnostic.Reason != ResolutionNoCandidates || diagnostic.Candidates != 0 {
+		t.Fatalf("diagnostic = %#v, error = %v", diagnostic, err)
+	}
+}
+
+func TestSelectYouTubeCandidateScoredFixtureCorpus(t *testing.T) {
+	tests := []struct {
+		name       string
+		track      desired.Track
+		candidates []youtubeCandidate
+		wantID     string
+		wantReason ResolutionReason
+	}{
+		{
+			name:       "punctuation and separators",
+			track:      desired.Track{Name: "Sweet Dreams (Are Made of This)", Artists: []desired.NamedURI{{Name: "Eurythmics"}}, DurationMS: 216_000},
+			candidates: []youtubeCandidate{{ID: "punctuation", Title: "Eurythmics - Sweet Dreams [Are Made Of This] (Official Video)", Uploader: "Eurythmics", Duration: 216}},
+			wantID:     "punctuation",
+		},
+		{
+			name:       "apostrophe formatting",
+			track:      desired.Track{Name: "Don't Speak", Artists: []desired.NamedURI{{Name: "No Doubt"}}, DurationMS: 263_000},
+			candidates: []youtubeCandidate{{ID: "apostrophe1", Title: "No Doubt - Dont Speak", Uploader: "No Doubt", Duration: 263}},
+			wantID:     "apostrophe1",
+		},
+		{
+			name:       "reordered artists",
+			track:      desired.Track{Name: "Close Your Eyes", Artists: []desired.NamedURI{{Name: "Run The Jewels"}, {Name: "Zack de la Rocha"}}, DurationMS: 224_000},
+			candidates: []youtubeCandidate{{ID: "artistorder", Title: "Zack de la Rocha x Run The Jewels - Close Your Eyes", Uploader: "Mass Appeal Records", Duration: 224}},
+			wantID:     "artistorder",
+		},
+		{
+			name:       "featured artist in title with label uploader",
+			track:      desired.Track{Name: "Feel Good Inc.", Artists: []desired.NamedURI{{Name: "Gorillaz"}, {Name: "De La Soul"}}, DurationMS: 222_000},
+			candidates: []youtubeCandidate{{ID: "featuredone", Title: "Gorillaz - Feel Good Inc. ft. De La Soul", Uploader: "Parlophone Records", Duration: 222}},
+			wantID:     "featuredone",
+		},
+		{
+			name:       "featured artists before title",
+			track:      desired.Track{Name: "Feel Good Inc.", Artists: []desired.NamedURI{{Name: "Gorillaz"}, {Name: "De La Soul"}}, DurationMS: 222_000},
+			candidates: []youtubeCandidate{{ID: "featurepre1", Title: "Gorillaz feat. De La Soul - Feel Good Inc.", Uploader: "Parlophone Records", Duration: 222}},
+			wantID:     "featurepre1",
+		},
+		{
+			name:       "topic uploader cannot independently prove artist",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "topicupload", Title: "Teardrop", Uploader: "Massive Attack - Topic", Duration: 330}},
+			wantReason: ResolutionArtist,
+		},
+		{
+			name:       "artist channel remains strong beside label uploader",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "labelbeside", Title: "Teardrop", Channel: "Massive Attack", Uploader: "UMG Recordings", Duration: 330}},
+			wantID:     "labelbeside",
+		},
+		{
+			name:       "artist substring is not identity",
+			track:      desired.Track{Name: "All I Need", Artists: []desired.NamedURI{{Name: "Air"}}, DurationMS: 250_000},
+			candidates: []youtubeCandidate{{ID: "substring01", Title: "Chair - All I Need", Uploader: "Chair", Duration: 250}},
+			wantReason: ResolutionArtist,
+		},
+		{
+			name:       "title token boundaries remain meaningful",
+			track:      desired.Track{Name: "Therapist", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 250_000},
+			candidates: []youtubeCandidate{{ID: "wordbounds1", Title: "Artist - The Rapist", Uploader: "Artist", Duration: 250}},
+			wantReason: ResolutionTitle,
+		},
+		{
+			name:       "self titled exact match",
+			track:      desired.Track{Name: "Talk Talk", Artists: []desired.NamedURI{{Name: "Talk Talk"}}, DurationMS: 200_000},
+			candidates: []youtubeCandidate{{ID: "selftitle01", Title: "Talk Talk - Talk Talk", Uploader: "Talk Talk", Duration: 200}},
+			wantID:     "selftitle01",
+		},
+		{
+			name:       "artist words remain in authoritative title",
+			track:      desired.Track{Name: "The Day", Artists: []desired.NamedURI{{Name: "The The"}}, DurationMS: 200_000},
+			candidates: []youtubeCandidate{{ID: "thetheday01", Title: "The The - The Day", Uploader: "The The", Duration: 200}},
+			wantID:     "thetheday01",
+		},
+		{
+			name:       "artist word cannot disappear from track title",
+			track:      desired.Track{Name: "Air Supply", Artists: []desired.NamedURI{{Name: "Air"}}, DurationMS: 200_000},
+			candidates: []youtubeCandidate{{ID: "airsupply01", Title: "Air - Supply", Uploader: "Air", Duration: 200}},
+			wantReason: ResolutionWeakWinner,
+		},
+		{
+			name:       "mix in artist name is not a version marker",
+			track:      desired.Track{Name: "Shout Out to My Ex", Artists: []desired.NamedURI{{Name: "Little Mix"}}, DurationMS: 246_000},
+			candidates: []youtubeCandidate{{ID: "littlemix01", Title: "Little Mix - Shout Out to My Ex", Uploader: "Little Mix", Duration: 246}},
+			wantID:     "littlemix01",
+		},
+		{
+			name:       "artist name does not hide version marker",
+			track:      desired.Track{Name: "Lightning Crashes", Artists: []desired.NamedURI{{Name: "Live"}}, DurationMS: 325_000},
+			candidates: []youtubeCandidate{{ID: "liveartist1", Title: "Lightning Crashes (Live)", Uploader: "Live", Duration: 325}},
+			wantReason: ResolutionVersion,
+		},
+		{
+			name:       "artist prefix does not hide version marker",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "prefixlive1", Title: "Massive Attack (Live) - Teardrop", Uploader: "Massive Attack", Duration: 330}},
+			wantReason: ResolutionVersion,
+		},
+		{
+			name:       "version conflict",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "liveversion", Title: "Massive Attack - Teardrop (Live)", Uploader: "Massive Attack", Duration: 330}},
+			wantReason: ResolutionVersion,
+		},
+		{
+			name:       "duration conflict",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "durationbad", Title: "Massive Attack - Teardrop", Uploader: "Massive Attack", Duration: 350}},
+			wantReason: ResolutionDuration,
+		},
+		{
+			name:       "short track duration tolerance",
+			track:      desired.Track{Name: "Intro", Artists: []desired.NamedURI{{Name: "The xx"}}, DurationMS: 60_000},
+			candidates: []youtubeCandidate{{ID: "shorttrack1", Title: "The xx - Intro", Uploader: "The xx", Duration: 70}},
+			wantID:     "shorttrack1",
+		},
+		{
+			name:       "long track bounded duration tolerance",
+			track:      desired.Track{Name: "Long Song", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 600_000},
+			candidates: []youtubeCandidate{{ID: "longtrack01", Title: "Artist - Long Song", Uploader: "Artist", Duration: 619}},
+			wantID:     "longtrack01",
+		},
+		{
+			name:       "weak winner",
+			track:      youtubeTrack("Angel", 360_000),
+			candidates: []youtubeCandidate{{ID: "weakwinner1", Title: "Massive Attack - Angel Eyes", Uploader: "Massive Attack", Duration: 360}},
+			wantReason: ResolutionWeakWinner,
+		},
+		{
+			name:  "close runners up",
+			track: youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{
+				{ID: "ambiguous01", Title: "Massive Attack - Teardrop", Uploader: "Massive Attack", Duration: 330},
+				{ID: "ambiguous02", Title: "Massive Attack - Teardrop (Official Audio)", Uploader: "Massive Attack", Duration: 329},
+			},
+			wantReason: ResolutionAmbiguous,
+		},
+		{
+			name:  "duplicate IDs do not create ambiguity",
+			track: youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{
+				{ID: "duplicate01", Title: "Massive Attack - Teardrop", Uploader: "Massive Attack", Duration: 330},
+				{ID: "duplicate01", Title: "Massive Attack - Teardrop", Uploader: "Massive Attack", Duration: 330},
+			},
+			wantID: "duplicate01",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, err := selectYouTubeCandidate(tt.track, tt.candidates)
+			if tt.wantID != "" {
+				want := "https://www.youtube.com/watch?v=" + tt.wantID
+				if err != nil || url != want {
+					t.Fatalf("selection = %q, %v, want %q", url, err, want)
+				}
+				return
+			}
+			var diagnostic *ResolutionDiagnostic
+			if !errors.As(err, &diagnostic) || diagnostic.Reason != tt.wantReason {
+				t.Fatalf("diagnostic = %#v, error = %v, want reason %q", diagnostic, err, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestSelectYouTubeCandidateRejectsConflictingVersionMarkers(t *testing.T) {
+	for i, marker := range []string{"Live", "Remix", "Remastered", "Acoustic", "Instrumental", "Cover", "Slowed", "Sped Up", "Reverb", "Bass Boosted", "8D Audio", "Acapella"} {
+		t.Run(marker, func(t *testing.T) {
+			candidate := youtubeCandidate{ID: fmt.Sprintf("marker%05d", i), Title: "Massive Attack - Teardrop (" + marker + ")", Uploader: "Massive Attack", Duration: 330}
+			_, err := selectYouTubeCandidate(youtubeTrack("Teardrop", 330_000), []youtubeCandidate{candidate})
+			var diagnostic *ResolutionDiagnostic
+			if !errors.As(err, &diagnostic) || diagnostic.Reason != ResolutionVersion || diagnostic.VersionRejected != 1 {
+				t.Fatalf("diagnostic = %#v, error = %v", diagnostic, err)
+			}
+		})
+	}
+
+	track := youtubeTrack("Teardrop (Acoustic)", 330_000)
+	url, err := selectYouTubeCandidate(track, []youtubeCandidate{{ID: "requested01", Title: "Massive Attack - Teardrop Acoustic", Uploader: "Massive Attack", Duration: 330}})
+	if err != nil || url != "https://www.youtube.com/watch?v=requested01" {
+		t.Fatalf("requested version = %q, %v", url, err)
+	}
+}
+
+func TestSelectYouTubeCandidateRejectsAlternateContent(t *testing.T) {
+	for i, alternate := range []string{"tribute", "reaction", "tutorial"} {
+		t.Run(alternate, func(t *testing.T) {
+			candidate := youtubeCandidate{ID: fmt.Sprintf("other%06d", i), Title: "Massive Attack - Teardrop " + alternate, Uploader: "Massive Attack", Duration: 330}
+			_, err := selectYouTubeCandidate(youtubeTrack("Teardrop", 330_000), []youtubeCandidate{candidate})
+			var diagnostic *ResolutionDiagnostic
+			if !errors.As(err, &diagnostic) || diagnostic.MetadataRejected != 1 {
+				t.Fatalf("diagnostic = %#v, error = %v", diagnostic, err)
+			}
+		})
 	}
 }
 

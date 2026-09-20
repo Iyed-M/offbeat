@@ -90,6 +90,39 @@ func runAcquireRetry(configPath, homeDir, rawID string) int {
 	return runAcquisitionByID(configPath, homeDir, rawID, "acquire.retry")
 }
 
+func runAcquireRetryUnresolved(configPath, homeDir string) int {
+	const label = "acquire retry unresolved"
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
+		return 1
+	}
+	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.retry.unresolved"}, controlReadTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
+		return 1
+	}
+	if resp.Error != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
+		return 1
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
+		return 1
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		return 1
+	}
+	var result ipc.UnresolvedRetryBatchResult
+	if err := ipc.Decode(raw, &result); err != nil || result.Considered < 0 || result.Queued < 0 || result.SkippedActive < 0 || result.SkippedAvailable < 0 || result.SkippedRemoved < 0 || result.Queued+result.SkippedActive+result.SkippedAvailable+result.SkippedRemoved != result.Considered {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "Unresolved acquisition retry: %d queued, %d active, %d available, %d removed.\n", result.Queued, result.SkippedActive, result.SkippedAvailable, result.SkippedRemoved)
+	return 0
+}
+
 func runAcquisitionByID(configPath, homeDir, rawID, command string) int {
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil || id <= 0 {

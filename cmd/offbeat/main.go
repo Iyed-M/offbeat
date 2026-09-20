@@ -72,12 +72,15 @@ func main() {
 			os.Exit(runAcquireStatus(configPath, homeDir, rest[1]))
 		}
 		if len(rest) == 2 && rest[0] == "retry" {
+			if rest[1] == "unresolved" {
+				os.Exit(runAcquireRetryUnresolved(configPath, homeDir))
+			}
 			os.Exit(runAcquireRetry(configPath, homeDir, rest[1]))
 		}
 		if len(rest) == 2 {
 			os.Exit(runAcquire(configPath, homeDir, rest[0], rest[1]))
 		}
-		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id>")
+		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved")
 		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)

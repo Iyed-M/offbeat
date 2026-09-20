@@ -224,6 +224,72 @@ func TestMissingAcquisitionBatchIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestRetryUnresolvedAcquisitionsReusesEligibleWork(t *testing.T) {
+	d := newTestDB(t)
+	ctx := context.Background()
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	tracks := []desired.Track{
+		acquisitionTrack("spotify:track:retry"),
+		acquisitionTrack("spotify:track:available"),
+		acquisitionTrack("spotify:track:removed"),
+		acquisitionTrack("spotify:track:active"),
+		acquisitionTrack("spotify:track:failed"),
+	}
+	candidate := desired.Candidate{}
+	for i := range tracks {
+		track := tracks[i]
+		candidate.LikedSongs = append(candidate.LikedSongs, desired.CandidateEntry{Position: i, Kind: desired.EntrySupported, Track: &track})
+	}
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	uris := make([]string, 0, len(tracks))
+	for _, track := range tracks {
+		uris = append(uris, track.URI)
+	}
+	if batch, err := d.EnqueueMissingAcquisitions(ctx, uris); err != nil || batch.Queued != len(tracks) {
+		t.Fatalf("enqueue = %#v, %v", batch, err)
+	}
+	for i := range tracks {
+		work, err := d.ClaimAcquisition(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == len(tracks)-1 {
+			if err := d.FailAcquisition(ctx, work.ID, "retrieval failed"); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := d.UnresolveAcquisition(ctx, work.ID, "old diagnostic"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.EnqueueAcquisition(ctx, tracks[3].URI, "https://authorized.example/active"); err != nil {
+		t.Fatal(err)
+	}
+	candidate.LikedSongs = append(candidate.LikedSongs[:2], candidate.LikedSongs[3:]...)
+	for i := range candidate.LikedSongs {
+		candidate.LikedSongs[i].Position = i
+	}
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	batch, err := d.RetryUnresolvedAcquisitions(ctx, []string{tracks[0].URI, tracks[3].URI})
+	if err != nil || batch.Considered != 4 || batch.Queued != 1 || batch.SkippedActive != 1 || batch.SkippedAvailable != 1 || batch.SkippedRemoved != 1 {
+		t.Fatalf("retry unresolved = %#v, %v", batch, err)
+	}
+	retried, err := d.Acquisition(ctx, 1)
+	if err != nil || retried.State != AcquisitionPending || retried.Error != "" || retried.SourceURL != "" {
+		t.Fatalf("retried work = %#v, %v", retried, err)
+	}
+	again, err := d.RetryUnresolvedAcquisitions(ctx, []string{tracks[0].URI, tracks[3].URI})
+	if err != nil || again.Queued != 0 || again.Considered != 3 {
+		t.Fatalf("idempotent retry = %#v, %v", again, err)
+	}
+}
+
 func TestYouTubeAcquisitionMigrationPreservesDirectWork(t *testing.T) {
 	d := newTestDB(t)
 	ctx := context.Background()

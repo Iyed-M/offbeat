@@ -48,6 +48,14 @@ type AcquisitionBatch struct {
 	SkippedAttempted int
 }
 
+type UnresolvedRetryBatch struct {
+	Considered       int
+	Queued           int
+	SkippedActive    int
+	SkippedAvailable int
+	SkippedRemoved   int
+}
+
 type AcquisitionCounts struct {
 	Pending    int `json:"pending"`
 	Running    int `json:"running"`
@@ -292,6 +300,91 @@ func (d *DB) RetryAcquisition(ctx context.Context, id int64) (AcquisitionWork, e
 	}
 	committed = true
 	return work, nil
+}
+
+// RetryUnresolvedAcquisitions atomically returns eligible unresolved YouTube
+// work to pending. missingTrackURIs is the daemon's current filesystem-backed
+// Missing set; unresolved work outside it is retained for a later retry.
+func (d *DB) RetryUnresolvedAcquisitions(ctx context.Context, missingTrackURIs []string) (UnresolvedRetryBatch, error) {
+	missing := make(map[string]bool, len(missingTrackURIs))
+	for _, uri := range missingTrackURIs {
+		missing[uri] = true
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return UnresolvedRetryBatch{}, fmt.Errorf("begin retry unresolved acquisitions: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, track_uri FROM acquisition_work WHERE source_kind = ? AND state = ? ORDER BY id`, AcquisitionSourceYouTube, AcquisitionUnresolved)
+	if err != nil {
+		return UnresolvedRetryBatch{}, fmt.Errorf("list unresolved acquisitions: %w", err)
+	}
+	type unresolvedWork struct {
+		id       int64
+		trackURI string
+	}
+	var work []unresolvedWork
+	for rows.Next() {
+		var item unresolvedWork
+		if err := rows.Scan(&item.id, &item.trackURI); err != nil {
+			_ = rows.Close()
+			return UnresolvedRetryBatch{}, err
+		}
+		work = append(work, item)
+	}
+	if err := rows.Close(); err != nil {
+		return UnresolvedRetryBatch{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return UnresolvedRetryBatch{}, err
+	}
+
+	result := UnresolvedRetryBatch{Considered: len(work)}
+	for _, item := range work {
+		var desired bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM spotify_tracks WHERE uri = ?)`, item.trackURI).Scan(&desired); err != nil {
+			return UnresolvedRetryBatch{}, fmt.Errorf("check unresolved track: %w", err)
+		}
+		if !desired {
+			result.SkippedRemoved++
+			continue
+		}
+		if !missing[item.trackURI] {
+			result.SkippedAvailable++
+			continue
+		}
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acquisition_work WHERE track_uri = ? AND state IN (?, ?))`, item.trackURI, AcquisitionPending, AcquisitionRunning).Scan(&active); err != nil {
+			return UnresolvedRetryBatch{}, fmt.Errorf("check active acquisition: %w", err)
+		}
+		if active {
+			result.SkippedActive++
+			continue
+		}
+		changed, err := tx.ExecContext(ctx, `UPDATE acquisition_work SET source_url = NULL, state = ?, error = '', updated_at = ? WHERE id = ? AND source_kind = ? AND state = ?`, AcquisitionPending, acquisitionTime(), item.id, AcquisitionSourceYouTube, AcquisitionUnresolved)
+		if err != nil {
+			return UnresolvedRetryBatch{}, fmt.Errorf("retry unresolved acquisition: %w", err)
+		}
+		count, err := changed.RowsAffected()
+		if err != nil {
+			return UnresolvedRetryBatch{}, err
+		}
+		if count != 1 {
+			return UnresolvedRetryBatch{}, fmt.Errorf("%w: acquisition %d is no longer unresolved", ErrAcquisitionPrecondition, item.id)
+		}
+		result.Queued++
+	}
+	if err := tx.Commit(); err != nil {
+		return UnresolvedRetryBatch{}, fmt.Errorf("commit retry unresolved acquisitions: %w", err)
+	}
+	committed = true
+	return result, nil
 }
 
 // FailAcquisition records a tool failure for running work.

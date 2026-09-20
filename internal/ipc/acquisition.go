@@ -41,6 +41,14 @@ type AcquisitionBatchResult struct {
 	Available        int `json:"available"`
 }
 
+type UnresolvedRetryBatchResult struct {
+	Considered       int `json:"considered"`
+	Queued           int `json:"queued"`
+	SkippedActive    int `json:"skipped_active"`
+	SkippedAvailable int `json:"skipped_available"`
+	SkippedRemoved   int `json:"skipped_removed"`
+}
+
 type AcquisitionCountsResult struct {
 	Pending    int `json:"pending"`
 	Running    int `json:"running"`
