@@ -59,6 +59,10 @@ _Avoid_: generalized resolver pipeline
 The concrete v1 process that uses a Missing track's Spotify metadata to select one eligible YouTube media URL for Acquisition work. It is source selection for one track, not a claim that two catalog tracks are the same recording.
 _Avoid_: library matching, fuzzy deduplication
 
+**Resolution diagnostic**:
+A bounded explanation of why YouTube resolution did not select a source, such as missing candidates, field conflicts, a weak winner, or an ambiguous runner-up. It summarizes one outcome without retaining candidate history or creating review state.
+_Avoid_: confidence tier, review decision
+
 **Missing-set acquisition**:
 An explicitly requested batch that attempts YouTube resolution and Acquisition work for every Missing track in the current Desired Spotify state. Each track succeeds, fails, or remains unresolved independently.
 _Avoid_: full acquire, automatic sync acquisition

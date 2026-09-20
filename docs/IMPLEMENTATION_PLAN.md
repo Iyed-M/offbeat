@@ -2,9 +2,9 @@
 
 > **Workflow status:** This document is the delivery roadmap, not an active task queue. Before implementation, use `/to-spec` to publish the next milestone as a GitHub issue and `/to-tickets` to split the approved spec into dependency-linked agent-ready issues. GitHub issues are authoritative for execution.
 >
-> **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. ADR-0011 adds only the concrete YouTube missing-set workflow in M6A; it does not restore the older generalized matching/review/acquisition architecture.
+> **Scope reset (2026-09-17):** ADR-0010 replaces the original post-M3 roadmap. M0–M3 remain completed foundations. M4 onward follows the current-state-first plan below. ADR-0011 adds only the concrete YouTube missing-set workflow in M6A; ADR-0012 adds the observed resolver recall correction in M6B. Neither restores the older generalized matching/review/acquisition architecture.
 >
-> **Current delivery status:** M4–M6A are implemented. M7 is the next planned milestone.
+> **Current delivery status:** M4–M6A are implemented. M6B is the next planned milestone.
 
 ## 1. Planning principles
 
@@ -370,7 +370,78 @@ An opt-in real-tool smoke test must also resolve and download a user-authorized 
 
 ---
 
-# 9. Milestone 7 — Desktop M3U8 Materialization
+# 9. Milestone 6B — Resolver Recall and Explainability
+
+## Timebox
+
+**3–5 engineering days**
+
+## Objective
+
+Correct the observed M6A failure mode where ordinary YouTube metadata variation leaves plausible tracks unresolved, while preserving conservative abstention for weak, conflicting, or ambiguous candidates.
+
+## Deliverables
+
+Keep the existing single built-in plain-YouTube resolver and retrieval boundary. Do not introduce spotDL, YouTube Music, ISRC lookup, provider plugins, or cross-track matching. Adapt the useful parts of spotDL's matching shape to Offbeat's stricter policy:
+
+- inspect up to ten plain-YouTube candidates rather than five;
+- normalize punctuation, separators, artist ordering, and featured-artist presentation before comparison;
+- score title identity and artist evidence separately instead of requiring exact token and primary-artist phrase containment;
+- consider artist evidence from candidate title plus uploader/channel metadata, while preventing a label/topic uploader from proving identity by itself;
+- keep conflicting meaningful version markers and alternate-content markers as hard rejections;
+- use duration as both a fixture-backed hard eligibility guard and a ranking signal;
+- require the best eligible candidate to clear an acceptance floor and beat the runner-up by a declared margin;
+- never use views or popularity to resolve ambiguity.
+
+Persist one bounded unresolved diagnostic summary that explains the terminal category and useful rejection counts, for example no search results, title mismatch, artist mismatch, version conflict, duration mismatch, weak winner, or close runner-up. Do not persist raw candidate metadata, source URLs in error text, score dumps, confidence tiers, or review state.
+
+Add an explicit batch command equivalent to:
+
+```bash
+offbeat acquire retry unresolved
+```
+
+It requeues every unresolved YouTube work item whose track is still Missing. Reuse the existing durable work item, clear its prior unresolved error, preserve failure isolation, and skip removed or now-available tracks. Repeating the command while work is active must remain idempotent. Automatic retry and failed-download batch retry remain out of scope.
+
+Document the scoring policy and unresolved categories in user-facing acquisition documentation. Keep exact numeric thresholds in one implementation policy location and justify them from the fixture corpus rather than copying spotDL's constants.
+
+## Tests
+
+Use both agreed seams:
+
+- resolver-boundary tests over captured/synthetic candidate metadata for score, eligibility, acceptance-floor, and runner-up-margin behavior;
+- daemon/Control/CLI tests for persisted diagnostics, batch unresolved retry, restart safety, idempotency, and per-track isolation.
+
+The deterministic corpus must include exact matches plus punctuation changes, reordered artists, featured artists represented only in titles, label/topic uploaders, short and long tracks, live/remix/remaster/acoustic/instrumental/cover conflicts, excessive duration differences, duplicate video IDs, weak winners, and close top-two candidates. Include representative cases that the M6A exact matcher left unresolved.
+
+Normal CI must not call YouTube. Keep one opt-in live search smoke test to detect boundary drift; its changing result order must not define matcher correctness.
+
+## Out of scope
+
+- embedding or invoking spotDL;
+- YouTube Music, ISRC, Piped, SoundCloud, Bandcamp, or generalized provider fallback;
+- arbitrary query templates or disabling result filtering;
+- view-count/popularity ranking;
+- library-wide fuzzy matching, cross-track equivalence, or asset deduplication;
+- persistent candidate lists, confidence tiers, or a human review queue;
+- automatic retries or batch retry of retrieval/tool failures.
+
+## Completion gate
+
+Against the approved deterministic corpus:
+
+```text
+ordinary YouTube metadata variations -> uniquely correct candidate selected
+version/duration conflicts           -> unresolved with a specific category
+weak or close best candidates        -> unresolved as weak or ambiguous
+retry unresolved                     -> durable eligible work is reprocessed once
+```
+
+The corpus must resolve every labeled safe-match fixture, reject every labeled wrong/ambiguous fixture, and expose a bounded reason for every unresolved fixture. An opt-in live run must demonstrate at least one formerly unresolved authorized fixture entering the existing retrieval path.
+
+---
+
+# 10. Milestone 7 — Desktop M3U8 Materialization
 
 ## Timebox
 
@@ -423,7 +494,7 @@ At this point Offbeat should be useful as a desktop-only product. Use it before 
 
 ---
 
-# 10. Milestone 8 — One-Device Android Manual Sync
+# 11. Milestone 8 — One-Device Android Manual Sync
 
 ## Timebox
 
@@ -493,7 +564,7 @@ manual connect/authenticate
 
 ---
 
-# 11. Milestone 9 — Setup, Packaging, and Reliability
+# 12. Milestone 9 — Setup, Packaging, and Reliability
 
 ## Timebox
 
@@ -550,7 +621,7 @@ without source-code editing.
 
 ---
 
-# 12. Estimated remaining effort after M3
+# 13. Estimated remaining effort after M3
 
 Planning timeboxes:
 
@@ -560,14 +631,15 @@ Planning timeboxes:
 | M5 — managed tracks/missing | 2–3 days |
 | M6 — minimal acquisition | 4–6 days |
 | M6A — YouTube missing-set acquisition | 3–5 days |
+| M6B — resolver recall and explainability | 3–5 days |
 | M7 — M3U8 | 1–2 days |
 | M8 — Android manual sync | 5–7 days |
 | M9 — setup/reliability | 4–7 days |
-| **Total** | **21–33 engineering days** |
+| **Total** | **24–38 engineering days** |
 
 These are scope-control estimates, not delivery promises. If a milestone exceeds its timebox, first check whether deferred architecture has been pulled back into scope.
 
-## 13. Deferred backlog after lean v1
+## 14. Deferred backlog after lean v1
 
 Do not schedule these automatically. Reconsider them from real usage:
 

@@ -48,7 +48,7 @@ Offbeat v1 must:
 9. maintain one managed local file per supported Spotify track when available;
 10. identify supported desired tracks whose managed file is missing;
 11. let the user explicitly request acquisition of every currently missing supported track;
-12. resolve each requested track to one eligible YouTube media URL using its Spotify metadata;
+12. resolve each requested track to one eligible YouTube media URL using tolerant metadata comparison while abstaining on weak or ambiguous candidates;
 13. acquire resolved media with `yt-dlp` only when the user is authorized to download it;
 14. isolate per-track resolution/download failures so the rest of the missing set continues;
 15. generate ordinary `.m3u8` playlists containing the playable subset in Spotify order;
@@ -289,7 +289,9 @@ offbeat acquire missing
 offbeat acquire <spotify-track-uri> <authorized-url>
 ```
 
-`offbeat acquire missing` snapshots the distinct supported Missing tracks in the current Desired Spotify state. For each track, the built-in YouTube resolver searches using Spotify title, artists, duration, and meaningful version markers, selects one eligible unambiguous result, and queues its URL for retrieval. One unresolved or failed track must not block the rest of the batch.
+`offbeat acquire missing` snapshots the distinct supported Missing tracks in the current Desired Spotify state. For each track, the built-in YouTube resolver searches using Spotify title, artists, duration, and meaningful version markers, compares a bounded candidate set with normalized field-specific scoring, selects one eligible unambiguous result, and queues its URL for retrieval. One unresolved or failed track must not block the rest of the batch.
+
+Resolution must tolerate ordinary YouTube metadata variation such as punctuation, artist ordering, featured-artist formatting, and label/topic uploaders. It must still reject conflicting recording/version markers, implausible durations, weak candidates, and candidates that do not beat the runner-up by a declared margin. Popularity must not substitute for metadata agreement.
 
 The direct-URL form remains available when automatic resolution is ambiguous, produces no eligible candidate, or the user prefers a different authorized source. Repeating missing-set acquisition must not create competing active work or reacquire an already available track.
 
@@ -313,7 +315,9 @@ Exact names are implementation-defined.
 
 Bounded concurrency is required. A simple manual retry is acceptable for v1; complex retry scheduling is not required unless real failure behavior demonstrates a need.
 
-`offbeat acquire missing` must report queued and already-available/active counts. `offbeat acquire status` must report aggregate and per-track pending, running, unresolved, failed, and complete outcomes without requiring a persistent human review queue.
+`offbeat acquire missing` must report queued and already-available/active counts. `offbeat acquire status` must report aggregate and per-track pending, running, unresolved, failed, and complete outcomes without requiring a persistent human review queue. An unresolved result must report a bounded diagnostic that distinguishes no candidates, metadata rejection by field, a weak best candidate, and an ambiguous best/runner-up pair without persisting candidate lists.
+
+The user must be able to explicitly requeue all still-Missing unresolved YouTube work after resolver policy improves. This batch retry must reuse durable work and retain per-track failure isolation; it is not automatic retry scheduling.
 
 ### 11.3 Media processing
 
@@ -408,6 +412,8 @@ v1 must have automated tests for failure modes that threaten user state, especia
 - daemon restart with committed Spotify state intact;
 - acquisition work surviving restart when marked persistent;
 - failed acquisition not blocking unrelated tracks;
+- resolver recall across punctuation, artist-order, featured-artist, uploader, and duration variations without accepting version conflicts or close ambiguous candidates;
+- unresolved diagnostics and batch requeue of unresolved work;
 - generated playlist correctness;
 - interrupted Android sync leaving already-completed desktop/Android content usable;
 - no mutation outside Offbeat-owned state/directories.
