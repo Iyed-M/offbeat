@@ -136,6 +136,24 @@ func acquireBatchControl(t *testing.T, d *Daemon) ipc.AcquisitionBatchResult {
 	return result
 }
 
+func retryUnresolvedControl(t *testing.T, d *Daemon) ipc.UnresolvedRetryBatchResult {
+	t.Helper()
+	raw, err := ipc.Encode(ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.retry.unresolved"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := sendRaw(t, SocketPath(d.socketDir), append(raw, '\n'))
+	if response.Error != nil {
+		t.Fatalf("retry unresolved: %v", response.Error)
+	}
+	data, _ := json.Marshal(response.Result)
+	var result ipc.UnresolvedRetryBatchResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func fakeMedia(t *testing.T) (*acquisition.Media, error) {
 	// Retrieval tests validate actual audio. This injected boundary supplies a
 	// completed regular file to exercise daemon ownership/publication behavior.
@@ -246,6 +264,128 @@ func TestYouTubeMissingSetResolutionIsolationAndDirectOverride(t *testing.T) {
 	}
 	override := acquireControl(t, d, ipc.Request{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:two", SourceURL: "https://fixture.test/override"}})
 	waitAcquisition(t, d, override.ID, "complete")
+}
+
+func TestResolutionDiagnosticPersistsAndUnresolvedRetryIsIsolated(t *testing.T) {
+	var retry atomic.Bool
+	home, err := os.MkdirTemp("", "offbeat-m6b-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return fakeMedia(t)
+	}), 2)
+	d.resolver = resolveFunc(func(_ context.Context, track desired.Track) (string, error) {
+		if retry.Load() && track.Name == "one" {
+			return "https://www.youtube.com/watch?v=resolved001", nil
+		}
+		reason := acquisition.ResolutionMetadata
+		if retry.Load() {
+			reason = acquisition.ResolutionDuration
+		}
+		return "", &acquisition.ResolutionDiagnostic{Reason: reason, Candidates: 3, MetadataRejected: 2, DurationRejected: 1}
+	})
+	seedAcquisitionTracks(t, d, "one", "two")
+	runAcquisitionDaemon(t, d)
+	if batch := acquireBatchControl(t, d); batch.Queued != 2 {
+		t.Fatalf("initial batch = %#v", batch)
+	}
+	one := waitAcquisition(t, d, 1, "unresolved")
+	waitAcquisition(t, d, 2, "unresolved")
+	if !strings.Contains(one.Error, "YouTube resolution metadata_mismatch") || strings.Contains(one.Error, "youtube.com") {
+		t.Fatalf("persisted diagnostic = %q", one.Error)
+	}
+
+	retry.Store(true)
+	if batch := retryUnresolvedControl(t, d); batch.Considered != 2 || batch.Queued != 2 {
+		t.Fatalf("retry batch = %#v", batch)
+	}
+	waitAcquisition(t, d, 1, "complete")
+	two := waitAcquisition(t, d, 2, "unresolved")
+	if !strings.Contains(two.Error, "YouTube resolution duration_mismatch") {
+		t.Fatalf("isolated unresolved diagnostic = %q", two.Error)
+	}
+}
+
+func TestRetryUnresolvedSkipsAvailableRemovedAndActiveTracks(t *testing.T) {
+	d := acquisitionDaemon(t, t.TempDir(), retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return fakeMedia(t)
+	}), 1)
+	seedAcquisitionTracks(t, d, "retry", "available", "removed", "active")
+	batch, err := d.DB.EnqueueMissingAcquisitions(context.Background(), []string{
+		"spotify:track:retry", "spotify:track:available", "spotify:track:removed", "spotify:track:active",
+	})
+	if err != nil || batch.Queued != 4 {
+		t.Fatalf("enqueue = %#v, %v", batch, err)
+	}
+	for range 4 {
+		work, err := d.DB.ClaimAcquisition(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.DB.UnresolveAcquisition(context.Background(), work.ID, "old diagnostic"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, err := d.managedFiles.PublishSynthetic("spotify:track:available")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DB.Exec(`INSERT INTO managed_tracks(track_uri, relative_path) VALUES (?, ?)`, "spotify:track:available", path); err != nil {
+		t.Fatal(err)
+	}
+	seedAcquisitionTracks(t, d, "retry", "available", "active")
+	if _, err := d.DB.EnqueueAcquisition(context.Background(), "spotify:track:active", "https://fixture.test/active"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := d.handleAcquisition(context.Background(), ipc.Request{Command: "acquire.retry.unresolved"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.(ipc.UnresolvedRetryBatchResult)
+	if got.Considered != 4 || got.Queued != 1 || got.SkippedActive != 1 || got.SkippedAvailable != 1 || got.SkippedRemoved != 1 {
+		t.Fatalf("retry result = %#v", got)
+	}
+}
+
+func TestRetriedUnresolvedWorkSurvivesRestart(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-m6b-restart-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return fakeMedia(t)
+	}), 1)
+	seedAcquisitionTracks(t, d, "one")
+	if _, err := d.DB.EnqueueMissingAcquisitions(context.Background(), []string{"spotify:track:one"}); err != nil {
+		t.Fatal(err)
+	}
+	work, err := d.DB.ClaimAcquisition(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.UnresolveAcquisition(context.Background(), work.ID, "old diagnostic"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := d.handleAcquisition(context.Background(), ipc.Request{Command: "acquire.retry.unresolved"})
+	if err != nil || result.(ipc.UnresolvedRetryBatchResult).Queued != 1 {
+		t.Fatalf("retry = %#v, %v", result, err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d = acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return fakeMedia(t)
+	}), 1)
+	d.resolver = resolveFunc(func(context.Context, desired.Track) (string, error) {
+		return "https://www.youtube.com/watch?v=restartm6b1", nil
+	})
+	runAcquisitionDaemon(t, d)
+	waitAcquisition(t, d, work.ID, "complete")
 }
 
 func TestSelectedYouTubeURLSurvivesRestart(t *testing.T) {

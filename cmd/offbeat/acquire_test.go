@@ -136,6 +136,11 @@ func TestCLIAcquireMissingAndAggregateStatus(t *testing.T) {
 	if err != nil || stderr != "" || out != "Acquisitions: 0 pending, 0 running, 1 unresolved, 0 failed, 0 complete.\nAcquisition 1: unresolved (spotify:track:one).\nError: no unique eligible YouTube result\n" {
 		t.Fatalf("aggregate status = stdout %q stderr %q err %v", out, stderr, err)
 	}
+	out, stderr, err = runCLI(t, home, "acquire", "retry", "unresolved")
+	if err != nil || stderr != "" || out != "Unresolved acquisition retry: 1 queued, 0 active, 0 available, 0 removed.\n" {
+		t.Fatalf("acquire retry unresolved = stdout %q stderr %q err %v", out, stderr, err)
+	}
+	waitCLIAcquisitionState(t, d, 1, "unresolved")
 }
 
 func TestCLIAcquireDoesNotRetryUnknownOutcome(t *testing.T) {

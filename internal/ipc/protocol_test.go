@@ -111,6 +111,15 @@ func TestDecodeAcquisitionRequests(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:    "retry unresolved",
+			payload: `{"version":1,"command":"acquire.retry.unresolved"}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionRetry != nil {
+					t.Fatalf("AcquisitionRetry = %#v", req.AcquisitionRetry)
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -141,6 +150,7 @@ func TestDecodeRejectsInvalidAcquisitionRequestShapes(t *testing.T) {
 		`{"version":1,"command":"acquire.retry","acquisition_status":{"acquisition_id":1}}`,
 		`{"version":1,"command":"acquire.retry"}`,
 		`{"version":1,"command":"acquire.retry","acquisition_retry":{"acquisition_id":-1}}`,
+		`{"version":1,"command":"acquire.retry.unresolved","acquisition_retry":{"acquisition_id":1}}`,
 	} {
 		var req ipc.Request
 		if err := ipc.Decode([]byte(payload), &req); err == nil {
@@ -174,6 +184,7 @@ func TestEncodeProducesNoNewline(t *testing.T) {
 func TestAcquisitionSummariesStayBoundedForLargeLibraries(t *testing.T) {
 	for _, result := range []any{
 		ipc.AcquisitionBatchResult{Considered: 1_000_000, Queued: 900_000, SkippedActive: 50_000, SkippedAttempted: 50_000, Available: 2_000_000},
+		ipc.UnresolvedRetryBatchResult{Considered: 1_000_000, Queued: 900_000, SkippedActive: 25_000, SkippedAvailable: 50_000, SkippedRemoved: 25_000},
 		ipc.AcquisitionCountsResult{Pending: 1_000_000, Running: 32, Unresolved: 500_000, Failed: 500_000, Complete: 2_000_000},
 	} {
 		encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: result})

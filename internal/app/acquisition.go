@@ -41,18 +41,9 @@ func (d *Daemon) handleAcquisition(ctx context.Context, req ipc.Request) (any, e
 		}
 		return acquisitionResult(work), nil
 	case "acquire.missing":
-		tracks, err := d.DB.DesiredManagedTracks(ctx)
+		missing, available, err := d.currentMissingTrackURIs(ctx)
 		if err != nil {
-			return nil, d.acquisitionError(err)
-		}
-		missing := make([]string, 0, len(tracks))
-		available := 0
-		for _, track := range tracks {
-			if d.managedFiles.Available(track.Track.URI, track.RelativePath) {
-				available++
-			} else {
-				missing = append(missing, track.Track.URI)
-			}
+			return nil, err
 		}
 		batch, err := d.DB.EnqueueMissingAcquisitions(ctx, missing)
 		if err != nil {
@@ -111,8 +102,41 @@ func (d *Daemon) handleAcquisition(ctx context.Context, req ipc.Request) (any, e
 			return nil, d.acquisitionError(err)
 		}
 		return acquisitionResult(work), nil
+	case "acquire.retry.unresolved":
+		missing, _, err := d.currentMissingTrackURIs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := d.DB.RetryUnresolvedAcquisitions(ctx, missing)
+		if err != nil {
+			return nil, d.acquisitionError(err)
+		}
+		return ipc.UnresolvedRetryBatchResult{
+			Considered:       batch.Considered,
+			Queued:           batch.Queued,
+			SkippedActive:    batch.SkippedActive,
+			SkippedAvailable: batch.SkippedAvailable,
+			SkippedRemoved:   batch.SkippedRemoved,
+		}, nil
 	}
 	return nil, ipc.NewError(ipc.CodeInvalidRequest, "unknown acquisition command")
+}
+
+func (d *Daemon) currentMissingTrackURIs(ctx context.Context) ([]string, int, error) {
+	tracks, err := d.DB.DesiredManagedTracks(ctx)
+	if err != nil {
+		return nil, 0, d.acquisitionError(err)
+	}
+	missing := make([]string, 0, len(tracks))
+	available := 0
+	for _, track := range tracks {
+		if d.managedFiles.Available(track.Track.URI, track.RelativePath) {
+			available++
+		} else {
+			missing = append(missing, track.Track.URI)
+		}
+	}
+	return missing, available, nil
 }
 
 func (d *Daemon) acquisitionError(err error) error {
@@ -214,7 +238,7 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		selected, err := d.resolver.Resolve(ctx, track)
 		if errors.Is(err, acquisition.ErrUnresolved) {
 			if ctx.Err() == nil {
-				if recordErr := d.DB.UnresolveAcquisition(ctx, work.ID, "no unique eligible YouTube result"); recordErr != nil {
+				if recordErr := d.DB.UnresolveAcquisition(ctx, work.ID, err.Error()); recordErr != nil {
 					d.Logger.Error("could not record unresolved acquisition", "acquisition_id", work.ID)
 				}
 			}

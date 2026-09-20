@@ -433,7 +433,7 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleConfig(ctx)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
-	case "acquire", "acquire.missing", "acquire.status", "acquire.retry":
+	case "acquire", "acquire.missing", "acquire.status", "acquire.retry", "acquire.retry.unresolved":
 		return d.handleAcquisition(ctx, req)
 	case "missing":
 		return d.handleMissing(ctx, req.Missing)
