@@ -2,6 +2,7 @@
 package managed
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -44,6 +45,69 @@ func Open(path string) (*Files, error) {
 }
 
 func (f *Files) Close() error { return f.root.Close() }
+
+// PublishPlaylist atomically publishes one generated M3U8 file. Filenames are
+// deliberately limited to a single path component; policy for deriving that
+// component from Spotify metadata belongs to the playlist materializer.
+func (f *Files) PublishPlaylist(filename string, content []byte) (bool, error) {
+	if filename == "" || filename == "." || filename == ".." || path.Base(filename) != filename || strings.Contains(filename, `\`) || !strings.HasSuffix(filename, ".m3u8") {
+		return false, fmt.Errorf("invalid playlist filename")
+	}
+	if err := f.checkDir("playlists"); err != nil {
+		return false, err
+	}
+	final := path.Join("playlists", filename)
+	info, err := f.root.Lstat(final)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("managed playlist destination must be a regular file")
+		}
+		if info.Size() == int64(len(content)) {
+			existing, err := f.root.OpenFile(final, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+			if err != nil {
+				return false, fmt.Errorf("open managed playlist: %w", err)
+			}
+			current, readErr := io.ReadAll(existing)
+			closeErr := existing.Close()
+			if readErr != nil {
+				return false, fmt.Errorf("read managed playlist: %w", readErr)
+			}
+			if closeErr != nil {
+				return false, fmt.Errorf("close managed playlist: %w", closeErr)
+			}
+			if bytes.Equal(current, content) {
+				return false, nil
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("inspect managed playlist: %w", err)
+	}
+
+	temp := "playlists/.publish-" + rand.Text()
+	staged, err := f.root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return false, fmt.Errorf("create managed playlist temporary file: %w", err)
+	}
+	defer f.root.Remove(temp)
+	if n, err := staged.Write(content); err != nil {
+		_ = staged.Close()
+		return false, fmt.Errorf("write managed playlist: %w", err)
+	} else if n != len(content) {
+		_ = staged.Close()
+		return false, fmt.Errorf("write managed playlist: %w", io.ErrShortWrite)
+	}
+	if err := staged.Sync(); err != nil {
+		_ = staged.Close()
+		return false, fmt.Errorf("sync managed playlist: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return false, fmt.Errorf("close managed playlist temporary file: %w", err)
+	}
+	if err := f.root.Rename(temp, final); err != nil {
+		return false, fmt.Errorf("replace managed playlist: %w", err)
+	}
+	return true, nil
+}
 
 // FixturePath is stable across metadata changes and safe for any normalized URI.
 // Full SHA-256 identities avoid filename collisions and filesystem metacharacters.

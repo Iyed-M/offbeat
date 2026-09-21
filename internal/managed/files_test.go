@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Iyed-M/offbeat/internal/managed"
 )
@@ -193,5 +195,98 @@ func TestManagedRootRejectsSymlinkDirectories(t *testing.T) {
 				t.Fatalf("external mutation: %v %v", entries, err)
 			}
 		})
+	}
+}
+
+func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+
+	content := []byte("#EXTM3U\n../tracks/example.wav\n")
+	changed, err := files.PublishPlaylist("Mix.m3u8", content)
+	if err != nil || !changed {
+		t.Fatalf("first publish = %v, %v", changed, err)
+	}
+	playlistPath := filepath.Join(root, "playlists", "Mix.m3u8")
+	before, err := os.Stat(playlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Filesystems with coarse timestamps can hide a rewrite, so compare the
+	// inode as well as requiring the publication boundary to report a no-op.
+	time.Sleep(time.Millisecond)
+	changed, err = files.PublishPlaylist("Mix.m3u8", append([]byte(nil), content...))
+	if err != nil || changed {
+		t.Fatalf("identical publish = %v, %v", changed, err)
+	}
+	after, err := os.Stat(playlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("identical playlist bytes were rewritten")
+	}
+
+	outsideFile := filepath.Join(outside, "sentinel.m3u8")
+	if err := os.WriteFile(outsideFile, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(root, "playlists", "Linked.m3u8")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files.PublishPlaylist("Linked.m3u8", content); err == nil {
+		t.Fatal("published over destination symlink")
+	}
+	if got, err := os.ReadFile(outsideFile); err != nil || string(got) != "untouched" {
+		t.Fatalf("outside destination changed: %q, %v", got, err)
+	}
+
+	for _, filename := range []string{"../escape.m3u8", `/escape.m3u8`, `dir\\escape.m3u8`, "not-a-playlist"} {
+		if _, err := files.PublishPlaylist(filename, content); err == nil {
+			t.Fatalf("accepted unsafe filename %q", filename)
+		}
+	}
+	blocked := filepath.Join(root, "playlists", "Blocked.m3u8")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files.PublishPlaylist("Blocked.m3u8", content); err == nil {
+		t.Fatal("published over non-regular destination")
+	}
+	playlistEntries, err := os.ReadDir(filepath.Join(root, "playlists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range playlistEntries {
+		if strings.HasPrefix(entry.Name(), ".publish-") {
+			t.Fatalf("temporary playlist leaked after failure: %s", entry.Name())
+		}
+	}
+
+	if err := os.Rename(filepath.Join(root, "playlists"), filepath.Join(root, "old-playlists")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "playlists")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files.PublishPlaylist("Escape.m3u8", content); err == nil {
+		t.Fatal("published through playlist-directory symlink")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("outside directory changed: %v, %v", entries, err)
+	}
+	oldEntries, err := os.ReadDir(filepath.Join(root, "old-playlists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range oldEntries {
+		if strings.HasPrefix(entry.Name(), ".publish-") {
+			t.Fatalf("temporary playlist leaked: %s", entry.Name())
+		}
 	}
 }
