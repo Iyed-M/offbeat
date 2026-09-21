@@ -97,5 +97,6 @@ func (d *Daemon) RegisterSyntheticTrackFixture(ctx context.Context, uri string) 
 	if err := d.DB.RegisterManagedTrack(ctx, uri, path); err != nil {
 		return "", err
 	}
+	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
 	return path, nil
 }

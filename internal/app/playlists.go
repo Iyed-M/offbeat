@@ -65,6 +65,17 @@ func (d *Daemon) materializePlaylistsLocked(ctx context.Context) error {
 	return nil
 }
 
+// reconcilePlaylistsAfterCommitLocked keeps an authoritative database commit
+// independent from its derived filesystem projection. Callers already hold
+// managedMu and must invoke this only after the source commit has succeeded.
+func (d *Daemon) reconcilePlaylistsAfterCommitLocked(ctx context.Context, source string) {
+	if err := d.materializePlaylistsLocked(ctx); err != nil {
+		// Filesystem errors can contain user-controlled paths. Keep the durable
+		// failure signal useful without copying those paths into daemon logs.
+		d.Logger.Error("reconcile desktop playlists after " + source + " commit")
+	}
+}
+
 func directPlaylistFilename(name string) (string, bool) {
 	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) || len(name) > 240 || strings.ContainsAny(name, `/\`) {
 		return "", false

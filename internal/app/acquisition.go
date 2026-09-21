@@ -282,4 +282,5 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		fail("could not commit managed audio; retry acquisition")
 		return
 	}
+	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
 }
