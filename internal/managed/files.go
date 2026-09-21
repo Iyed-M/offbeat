@@ -10,12 +10,18 @@ import (
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"syscall"
 )
 
 type Files struct {
 	root *os.Root
+}
+
+type stagedPlaylist struct {
+	temporary string
+	final     string
 }
 
 func Open(path string) (*Files, error) {
@@ -50,63 +56,188 @@ func (f *Files) Close() error { return f.root.Close() }
 // deliberately limited to a single path component; policy for deriving that
 // component from Spotify metadata belongs to the playlist materializer.
 func (f *Files) PublishPlaylist(filename string, content []byte) (bool, error) {
-	if filename == "" || filename == "." || filename == ".." || path.Base(filename) != filename || strings.Contains(filename, `\`) || !strings.HasSuffix(filename, ".m3u8") {
+	if !validPlaylistFilename(filename) {
 		return false, fmt.Errorf("invalid playlist filename")
 	}
 	if err := f.checkDir("playlists"); err != nil {
 		return false, err
 	}
 	final := path.Join("playlists", filename)
-	info, err := f.root.Lstat(final)
-	if err == nil {
-		if !info.Mode().IsRegular() {
-			return false, fmt.Errorf("managed playlist destination must be a regular file")
-		}
-		if info.Size() == int64(len(content)) {
-			existing, err := f.root.OpenFile(final, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-			if err != nil {
-				return false, fmt.Errorf("open managed playlist: %w", err)
-			}
-			current, readErr := io.ReadAll(existing)
-			closeErr := existing.Close()
-			if readErr != nil {
-				return false, fmt.Errorf("read managed playlist: %w", readErr)
-			}
-			if closeErr != nil {
-				return false, fmt.Errorf("close managed playlist: %w", closeErr)
-			}
-			if bytes.Equal(current, content) {
-				return false, nil
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("inspect managed playlist: %w", err)
+	matches, err := f.playlistMatches(final, content)
+	if err != nil || matches {
+		return false, err
 	}
 
 	temp := "playlists/.publish-" + rand.Text()
-	staged, err := f.root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return false, fmt.Errorf("create managed playlist temporary file: %w", err)
-	}
 	defer f.root.Remove(temp)
-	if n, err := staged.Write(content); err != nil {
-		_ = staged.Close()
-		return false, fmt.Errorf("write managed playlist: %w", err)
-	} else if n != len(content) {
-		_ = staged.Close()
-		return false, fmt.Errorf("write managed playlist: %w", io.ErrShortWrite)
+	if err := f.writePlaylistTemporary(temp, content); err != nil {
+		return false, err
 	}
-	if err := staged.Sync(); err != nil {
-		_ = staged.Close()
-		return false, fmt.Errorf("sync managed playlist: %w", err)
-	}
-	if err := staged.Close(); err != nil {
-		return false, fmt.Errorf("close managed playlist temporary file: %w", err)
+	if info, err := f.root.Lstat(final); err == nil && !info.Mode().IsRegular() {
+		return false, fmt.Errorf("managed playlist destination must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("inspect managed playlist: %w", err)
 	}
 	if err := f.root.Rename(temp, final); err != nil {
 		return false, fmt.Errorf("replace managed playlist: %w", err)
 	}
 	return true, nil
+}
+
+// ReconcilePlaylists publishes one complete generated playlist set, then
+// removes obsolete generated M3U8 files. Every changed file is fully staged
+// before any stale output is removed.
+func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
+	if err := f.checkDir("playlists"); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(desired))
+	for filename := range desired {
+		if !validPlaylistFilename(filename) {
+			return fmt.Errorf("invalid playlist filename")
+		}
+		names = append(names, filename)
+	}
+	sort.Strings(names)
+
+	directory, err := f.root.Open("playlists")
+	if err != nil {
+		return fmt.Errorf("open managed playlists: %w", err)
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		return fmt.Errorf("read managed playlists: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close managed playlists: %w", closeErr)
+	}
+	existing := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".m3u8") {
+			continue
+		}
+		filename := path.Join("playlists", entry.Name())
+		info, err := f.root.Lstat(filename)
+		if err != nil {
+			return fmt.Errorf("inspect managed playlist: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed playlist destination must be a regular file")
+		}
+		existing[entry.Name()] = struct{}{}
+	}
+
+	staged := make([]stagedPlaylist, 0, len(names))
+	defer func() {
+		for _, file := range staged {
+			_ = f.root.Remove(file.temporary)
+		}
+	}()
+	for _, filename := range names {
+		final := path.Join("playlists", filename)
+		matches, err := f.playlistMatches(final, desired[filename])
+		if err != nil {
+			return err
+		}
+		if matches {
+			continue
+		}
+		temporary := "playlists/.publish-" + rand.Text()
+		if err := f.writePlaylistTemporary(temporary, desired[filename]); err != nil {
+			return err
+		}
+		staged = append(staged, stagedPlaylist{temporary: temporary, final: final})
+	}
+	for _, file := range staged {
+		if info, err := f.root.Lstat(file.final); err == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("managed playlist destination must be a regular file")
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect managed playlist: %w", err)
+		}
+		if err := f.root.Rename(file.temporary, file.final); err != nil {
+			return fmt.Errorf("replace managed playlist: %w", err)
+		}
+	}
+	for filename := range existing {
+		if _, wanted := desired[filename]; wanted {
+			continue
+		}
+		stale := path.Join("playlists", filename)
+		info, err := f.root.Lstat(stale)
+		if err != nil {
+			return fmt.Errorf("inspect stale managed playlist: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("stale managed playlist must be a regular file")
+		}
+		if err := f.root.Remove(stale); err != nil {
+			return fmt.Errorf("remove stale managed playlist: %w", err)
+		}
+	}
+	return nil
+}
+
+func validPlaylistFilename(filename string) bool {
+	return filename != "" && filename != "." && filename != ".." && path.Base(filename) == filename && !strings.Contains(filename, `\`) && strings.HasSuffix(filename, ".m3u8")
+}
+
+func (f *Files) playlistMatches(name string, content []byte) (bool, error) {
+	info, err := f.root.Lstat(name)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect managed playlist: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("managed playlist destination must be a regular file")
+	}
+	if info.Size() != int64(len(content)) {
+		return false, nil
+	}
+	existing, err := f.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false, fmt.Errorf("open managed playlist: %w", err)
+	}
+	current, readErr := io.ReadAll(existing)
+	closeErr := existing.Close()
+	if readErr != nil {
+		return false, fmt.Errorf("read managed playlist: %w", readErr)
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close managed playlist: %w", closeErr)
+	}
+	return bytes.Equal(current, content), nil
+}
+
+func (f *Files) writePlaylistTemporary(name string, content []byte) error {
+	staged, err := f.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create managed playlist temporary file: %w", err)
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = f.root.Remove(name)
+		}
+	}()
+	if n, err := staged.Write(content); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("write managed playlist: %w", err)
+	} else if n != len(content) {
+		_ = staged.Close()
+		return fmt.Errorf("write managed playlist: %w", io.ErrShortWrite)
+	}
+	if err := staged.Sync(); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("sync managed playlist: %w", err)
+	}
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close managed playlist temporary file: %w", err)
+	}
+	complete = true
+	return nil
 }
 
 // FixturePath is stable across metadata changes and safe for any normalized URI.

@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/pelletier/go-toml/v2 v2.4.3
+	golang.org/x/text v0.31.0
 	modernc.org/sqlite v1.58.0
 )
 
