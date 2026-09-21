@@ -47,6 +47,59 @@ printf audio > "$out"
 	}
 }
 
+func TestRetrieveResolvesFFmpegNameBeforePassingLocationToYTDLP(t *testing.T) {
+	tools, captured := t.TempDir(), filepath.Join(t.TempDir(), "args")
+	ffmpeg := writeTool(t, tools, "ffmpeg", "exit 0")
+	ytdlp := writeTool(t, tools, "yt-dlp", fmt.Sprintf(`
+printf '%%s\n' "$@" > '%s'
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then out="$2"; shift 2; continue; fi
+  shift
+done
+printf audio > "${out%%.%%(ext)s}.mp3"
+`, captured))
+	ffprobe := writeTool(t, tools, "ffprobe", "printf '%s\\n' '{\"streams\":[{\"codec_type\":\"audio\",\"disposition\":{\"attached_pic\":0}}]}'")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	media, err := NewRetriever(config.Downloader{YTDLPPath: ytdlp, FFmpegPath: "ffmpeg", FFprobePath: ffprobe}).Retrieve(context.Background(), "https://media.example/owned.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	args, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--ffmpeg-location\n"+ffmpeg+"\n") {
+		t.Fatalf("yt-dlp args = %q, want resolved ffmpeg location %q", args, ffmpeg)
+	}
+}
+
+func TestRetrieveReportsMissingConfiguredExecutable(t *testing.T) {
+	tools := t.TempDir()
+	ytdlp := writeTool(t, tools, "yt-dlp", "exit 0")
+	ffprobe := writeTool(t, tools, "ffprobe", "exit 0")
+	t.Setenv("PATH", tools)
+
+	for _, tc := range []struct {
+		name string
+		cfg  config.Downloader
+		want string
+	}{
+		{"yt-dlp", config.Downloader{YTDLPPath: "missing-yt-dlp", FFprobePath: ffprobe}, "configured yt-dlp executable not found"},
+		{"FFmpeg", config.Downloader{YTDLPPath: ytdlp, FFmpegPath: "missing-ffmpeg", FFprobePath: ffprobe}, "configured FFmpeg executable not found"},
+		{"ffprobe", config.Downloader{YTDLPPath: ytdlp, FFprobePath: "missing-ffprobe"}, "configured ffprobe executable not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewRetriever(tc.cfg).Retrieve(context.Background(), "https://media.example/owned.mp3")
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Retrieve error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestRetrieveRejectsBadOrMultipleOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string

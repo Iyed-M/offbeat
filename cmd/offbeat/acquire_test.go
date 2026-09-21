@@ -75,7 +75,7 @@ func TestCLIAcquisitionSubmitStatusAndRetry(t *testing.T) {
 	work := waitCLIAcquisitionState(t, d, 1, "failed")
 
 	out, stderr, err = runCLI(t, home, "acquire", "status", fmt.Sprint(work.ID))
-	if err != nil || stderr != "" || out != "Acquisition 1: failed (spotify:track:one).\nError: media retrieval failed; check source and configured yt-dlp/FFmpeg tools, then retry\n" {
+	if err != nil || stderr != "" || out != "Acquisition 1: failed (spotify:track:one).\nError: media retrieval failed: controlled retrieval failure\n" {
 		t.Fatalf("acquire status = stdout %q stderr %q err %v", out, stderr, err)
 	}
 

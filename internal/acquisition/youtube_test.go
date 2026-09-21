@@ -88,6 +88,14 @@ printf '%%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Massive Attack - Teardr
 	}
 }
 
+func TestYTDLPResolverReportsMissingConfiguredExecutable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := NewYouTubeResolver(config.Downloader{YTDLPPath: "missing-yt-dlp"}).Resolve(context.Background(), youtubeTrack("Teardrop", 330_000))
+	if err == nil || err.Error() != "configured yt-dlp executable not found" {
+		t.Fatalf("Resolve error = %v", err)
+	}
+}
+
 func TestSelectYouTubeCandidateExplainsMissingCandidates(t *testing.T) {
 	_, err := selectYouTubeCandidate(youtubeTrack("Teardrop", 330_000), nil)
 	var diagnostic *ResolutionDiagnostic
