@@ -313,10 +313,19 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 	}
 	d.managedMu.Lock()
 	metadata, summary, changed, err := d.DB.ApplyDesiredSpotifyState(pending.ctx, response.Candidate)
+	var materializeErr error
+	if err == nil && changed {
+		materializeErr = d.materializePlaylistsLocked(pending.ctx)
+	}
 	d.managedMu.Unlock()
 	if err != nil {
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: &persistenceError{err}})
 		return ""
+	}
+	if materializeErr != nil {
+		// Playlist files are a derived projection. A publication failure cannot
+		// roll back the Desired Spotify state that already committed atomically.
+		d.Logger.Error("materialize desktop playlists after Spotify sync", "err", materializeErr)
 	}
 	d.completeSnapshotResponse(pending, snapshotCompletion{result: ipc.SpotifySyncResult{
 		Changed: changed, StateRevision: metadata.Revision,
