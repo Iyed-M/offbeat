@@ -70,6 +70,21 @@ func (r *YTDLP) Retrieve(ctx context.Context, sourceURL string) (_ *Media, retEr
 	if err := validateSourceURL(sourceURL); err != nil {
 		return nil, err
 	}
+	ytdlp, err := configuredExecutable(r.ytdlp, "yt-dlp")
+	if err != nil {
+		return nil, err
+	}
+	ffprobe, err := configuredExecutable(r.ffprobe, "ffprobe")
+	if err != nil {
+		return nil, err
+	}
+	ffmpeg := ""
+	if r.ffmpeg != "" {
+		ffmpeg, err = configuredExecutable(r.ffmpeg, "FFmpeg")
+		if err != nil {
+			return nil, err
+		}
+	}
 	stage, err := os.MkdirTemp("", "offbeat-acquisition-")
 	if err != nil {
 		return nil, fmt.Errorf("create acquisition staging: %w", err)
@@ -89,18 +104,18 @@ func (r *YTDLP) Retrieve(ctx context.Context, sourceURL string) (_ *Media, retEr
 		"--no-cache-dir", "--playlist-items", "1",
 		"--format", "bestaudio/best", "--extract-audio", "--audio-format", "best",
 	}
-	if r.ffmpeg != "" {
-		args = append(args, "--ffmpeg-location", r.ffmpeg)
+	if ffmpeg != "" {
+		args = append(args, "--ffmpeg-location", ffmpeg)
 	}
 	args = append(args, "--output", output, "--", sourceURL)
-	if err := runProcess(ctx, r.command(ctx, r.ytdlp, args...)); err != nil {
+	if err := runProcess(ctx, r.command(ctx, ytdlp, args...)); err != nil {
 		return nil, fmt.Errorf("retrieve authorized media: %w", err)
 	}
 	file, extension, err := stagedOutput(stage)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.validateAudio(ctx, file); err != nil {
+	if err := r.validateAudio(ctx, ffprobe, file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -158,13 +173,21 @@ func supportedExtension(extension string) bool {
 	}
 }
 
-func (r *YTDLP) validateAudio(ctx context.Context, file *os.File) error {
-	cmd := r.command(ctx, r.ffprobe, "-v", "error", "-show_entries", "stream=codec_type:stream_disposition=attached_pic", "-of", "json", "--", file.Name())
+func (r *YTDLP) validateAudio(ctx context.Context, ffprobe string, file *os.File) error {
+	cmd := r.command(ctx, ffprobe, "-v", "error", "-show_entries", "stream=codec_type:stream_disposition=attached_pic", "-of", "json", "--", file.Name())
 	output, err := runProcessOutput(ctx, cmd, 64<<10)
 	if err != nil {
 		return errors.New("staged output is not readable audio")
 	}
 	return validateProbeOutput(output)
+}
+
+func configuredExecutable(path, name string) (string, error) {
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		return "", fmt.Errorf("configured %s executable not found", name)
+	}
+	return resolved, nil
 }
 
 func validateProbeOutput(output []byte) error {

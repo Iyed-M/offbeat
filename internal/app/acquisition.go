@@ -245,7 +245,7 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 			return
 		}
 		if err != nil {
-			fail("YouTube resolution failed; check configured yt-dlp, then retry")
+			fail("YouTube resolution failed: " + err.Error())
 			return
 		}
 		if err := d.DB.SetAcquisitionSource(ctx, work.ID, selected); err != nil {
@@ -256,7 +256,7 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	}
 	media, err := d.retriever.Retrieve(ctx, work.SourceURL)
 	if err != nil {
-		fail("media retrieval failed; check source and configured yt-dlp/FFmpeg tools, then retry")
+		fail("media retrieval failed: " + err.Error())
 		return
 	}
 	if media == nil {

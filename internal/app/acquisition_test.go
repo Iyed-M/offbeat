@@ -172,12 +172,12 @@ func fakeMedia(t *testing.T) (*acquisition.Media, error) {
 	return &acquisition.Media{File: file, Extension: "wav"}, nil
 }
 
-func TestAcquisitionSuccessFailureIsolationAndRetry(t *testing.T) {
+func TestAcquisitionFailureDetailAndRetry(t *testing.T) {
 	var shouldFail atomic.Bool
 	shouldFail.Store(true)
 	retriever := retrieveFunc(func(ctx context.Context, url string) (*acquisition.Media, error) {
 		if url == "https://fixture.test/fail" && shouldFail.Load() {
-			return nil, errors.New("secret raw process output")
+			return nil, errors.New("controlled retrieval failure")
 		}
 		return fakeMedia(t)
 	})
@@ -187,8 +187,8 @@ func TestAcquisitionSuccessFailureIsolationAndRetry(t *testing.T) {
 	failed := acquireControl(t, d, ipc.Request{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:one", SourceURL: "https://fixture.test/fail"}})
 	good := acquireControl(t, d, ipc.Request{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:two", SourceURL: "https://fixture.test/good"}})
 	failure := waitAcquisition(t, d, failed.ID, "failed")
-	if failure.Error == "" || failure.Error == "secret raw process output" {
-		t.Fatalf("failure not sanitized: %#v", failure)
+	if failure.Error != "media retrieval failed: controlled retrieval failure" {
+		t.Fatalf("failure detail = %#v", failure)
 	}
 	waitAcquisition(t, d, good.ID, "complete")
 	result, err := d.handleMissing(context.Background(), nil)
@@ -305,6 +305,24 @@ func TestResolutionDiagnosticPersistsAndUnresolvedRetryIsIsolated(t *testing.T) 
 	two := waitAcquisition(t, d, 2, "unresolved")
 	if !strings.Contains(two.Error, "YouTube resolution duration_mismatch") {
 		t.Fatalf("isolated unresolved diagnostic = %q", two.Error)
+	}
+}
+
+func TestYouTubeResolverFailureDetailPersists(t *testing.T) {
+	d := acquisitionDaemon(t, t.TempDir(), retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return fakeMedia(t)
+	}), 1)
+	d.resolver = resolveFunc(func(context.Context, desired.Track) (string, error) {
+		return "", errors.New("configured yt-dlp executable not found")
+	})
+	seedAcquisitionTracks(t, d, "one")
+	runAcquisitionDaemon(t, d)
+	if batch := acquireBatchControl(t, d); batch.Queued != 1 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	work := waitAcquisition(t, d, 1, "failed")
+	if work.Error != "YouTube resolution failed: configured yt-dlp executable not found" {
+		t.Fatalf("failure detail = %q", work.Error)
 	}
 }
 

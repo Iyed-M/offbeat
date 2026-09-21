@@ -87,15 +87,16 @@ See [`spicetify/offbeat/README.md`](spicetify/offbeat/README.md) for the manual 
 
 The authoritative roadmap is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
-Remaining milestones after M6A:
+Roadmap after M6A:
 
 ```text
+M6B resolver recall and explainability
 M7  desktop M3U8 materialization
 M8  one-device Android manual sync
 M9  setup, packaging, and reliability
 ```
 
-Historical snapshots/revision replay, fuzzy matching/review, cross-track asset deduplication, advanced deletion/integrity tooling, mDNS discovery, resumable Android transfer, background Android sync, and broad multi-device management are deferred until real usage justifies them.
+Historical snapshots/revision replay, library-wide fuzzy matching/review, cross-track asset deduplication, advanced deletion/integrity tooling, mDNS discovery, resumable Android transfer, background Android sync, and broad multi-device management are deferred until real usage justifies them.
 
 ## Managed tracks and missing state
 

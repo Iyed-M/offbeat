@@ -100,12 +100,16 @@ func (r *YTDLPResolver) Resolve(ctx context.Context, track desired.Track) (strin
 	if query.Text == "" || query.DurationMS <= 0 {
 		return "", &ResolutionDiagnostic{Reason: ResolutionMetadata}
 	}
+	ytdlp, err := configuredExecutable(r.ytdlp, "yt-dlp")
+	if err != nil {
+		return "", err
+	}
 	args := []string{
 		"--no-config", "--no-plugin-dirs", "--flat-playlist", "--dump-single-json",
 		"--playlist-end", fmt.Sprint(youtubeCandidateLimit), "--no-warnings", "--",
 		fmt.Sprintf("ytsearch%d:%s", youtubeCandidateLimit, query.Text),
 	}
-	output, err := runProcessOutput(ctx, r.command(ctx, r.ytdlp, args...), 1<<20)
+	output, err := runProcessOutput(ctx, r.command(ctx, ytdlp, args...), 1<<20)
 	if err != nil {
 		return "", fmt.Errorf("search YouTube: %w", err)
 	}
