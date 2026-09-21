@@ -290,6 +290,17 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		d.Logger.Info("recovered stale control socket", "path", SocketPath(d.socketDir))
 	}
 
+	d.managedMu.Lock()
+	reconcileErr := d.materializePlaylistsLocked(ctx)
+	d.managedMu.Unlock()
+	if reconcileErr != nil {
+		if ctx.Err() != nil {
+			return d.shutdown(nil)
+		}
+		d.Logger.Error("reconcile desktop playlists before readiness")
+		return d.shutdown(errors.New("reconcile desktop playlists before readiness"))
+	}
+
 	listener, err := BindControlSocket(d.socketDir)
 	if err != nil {
 		return d.shutdown(err)
