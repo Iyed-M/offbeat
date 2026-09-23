@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Iyed-M/offbeat/internal/desired"
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -51,7 +52,7 @@ func (d *Daemon) materializePlaylistsLocked(ctx context.Context) error {
 		}
 		desiredPlaylists[filenames[i]] = renderM3U8(playlist.Entries, available)
 	}
-	if err := d.managedFiles.ReconcilePlaylists(desiredPlaylists); err != nil {
+	if err := d.managedFiles.ReconcilePlaylists(ctx, desiredPlaylists); err != nil {
 		return fmt.Errorf("reconcile desktop playlists: %w", err)
 	}
 	return nil
@@ -153,7 +154,7 @@ func truncateUTF8(value string, maxBytes int) string {
 }
 
 func playlistFilenameCollisionKey(basename string) string {
-	return strings.ToLower(norm.NFC.String(basename))
+	return norm.NFC.String(cases.Fold().String(basename))
 }
 
 func renderM3U8(entries []desired.Entry, available map[string]string) []byte {
