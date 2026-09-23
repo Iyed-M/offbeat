@@ -126,6 +126,10 @@ func TestDaemonStartupRepairsPlaylistBeforeReadiness(t *testing.T) {
 	if err := os.WriteFile(playlist, []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	orphanedTemporary := filepath.Join(d.Cfg.Paths.MusicRoot, "playlists", ".publish-interrupted")
+	if err := os.WriteFile(orphanedTemporary, []byte("interrupted staged output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +140,9 @@ func TestDaemonStartupRepairsPlaylistBeforeReadiness(t *testing.T) {
 	}
 	runAcquisitionDaemon(t, d)
 	assertFileBytes(t, playlist, "#EXTM3U\n../"+path+"\n")
+	if _, err := os.Lstat(orphanedTemporary); !os.IsNotExist(err) {
+		t.Fatalf("startup left interrupted temporary file behind: %v", err)
+	}
 	logs, err := os.ReadFile(d.Cfg.Paths.LogFile)
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package managed
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -52,43 +53,14 @@ func Open(path string) (*Files, error) {
 
 func (f *Files) Close() error { return f.root.Close() }
 
-// PublishPlaylist atomically publishes one generated M3U8 file. Filenames are
-// deliberately limited to a single path component; policy for deriving that
-// component from Spotify metadata belongs to the playlist materializer.
-func (f *Files) PublishPlaylist(filename string, content []byte) (bool, error) {
-	if !validPlaylistFilename(filename) {
-		return false, fmt.Errorf("invalid playlist filename")
-	}
-	if err := f.checkDir("playlists"); err != nil {
-		return false, err
-	}
-	final := path.Join("playlists", filename)
-	matches, err := f.playlistMatches(final, content)
-	if err != nil || matches {
-		return false, err
-	}
-
-	temp := "playlists/.publish-" + rand.Text()
-	defer f.root.Remove(temp)
-	if err := f.writePlaylistTemporary(temp, content); err != nil {
-		return false, err
-	}
-	if info, err := f.root.Lstat(final); err == nil && !info.Mode().IsRegular() {
-		return false, fmt.Errorf("managed playlist destination must be a regular file")
-	} else if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("inspect managed playlist: %w", err)
-	}
-	if err := f.root.Rename(temp, final); err != nil {
-		return false, fmt.Errorf("replace managed playlist: %w", err)
-	}
-	return true, nil
-}
-
 // ReconcilePlaylists publishes one complete generated playlist set, then
 // removes obsolete generated M3U8 files. Every changed file is fully staged
 // before any stale output is removed.
-func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
+func (f *Files) ReconcilePlaylists(ctx context.Context, desired map[string][]byte) error {
 	if err := f.checkDir("playlists"); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	names := make([]string, 0, len(desired))
@@ -113,7 +85,23 @@ func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
 		return fmt.Errorf("close managed playlists: %w", closeErr)
 	}
 	existing := make(map[string]struct{}, len(entries))
+	orphanedTemporary := make([]string, 0)
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if strings.HasPrefix(entry.Name(), ".publish-") {
+			filename := path.Join("playlists", entry.Name())
+			info, err := f.root.Lstat(filename)
+			if err != nil {
+				return fmt.Errorf("inspect managed playlist temporary file: %w", err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("managed playlist temporary file must be a regular file")
+			}
+			orphanedTemporary = append(orphanedTemporary, filename)
+			continue
+		}
 		if !strings.HasSuffix(entry.Name(), ".m3u8") {
 			continue
 		}
@@ -135,6 +123,9 @@ func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
 		}
 	}()
 	for _, filename := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		final := path.Join("playlists", filename)
 		matches, err := f.playlistMatches(final, desired[filename])
 		if err != nil {
@@ -144,12 +135,23 @@ func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
 			continue
 		}
 		temporary := "playlists/.publish-" + rand.Text()
-		if err := f.writePlaylistTemporary(temporary, desired[filename]); err != nil {
+		if err := f.writePlaylistTemporary(ctx, temporary, desired[filename]); err != nil {
 			return err
 		}
 		staged = append(staged, stagedPlaylist{temporary: temporary, final: final})
 	}
+	for _, filename := range orphanedTemporary {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := f.root.Remove(filename); err != nil {
+			return fmt.Errorf("remove managed playlist temporary file: %w", err)
+		}
+	}
 	for _, file := range staged {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if info, err := f.root.Lstat(file.final); err == nil && !info.Mode().IsRegular() {
 			return fmt.Errorf("managed playlist destination must be a regular file")
 		} else if err != nil && !os.IsNotExist(err) {
@@ -160,6 +162,9 @@ func (f *Files) ReconcilePlaylists(desired map[string][]byte) error {
 		}
 	}
 	for filename := range existing {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, wanted := desired[filename]; wanted {
 			continue
 		}
@@ -211,7 +216,10 @@ func (f *Files) playlistMatches(name string, content []byte) (bool, error) {
 	return bytes.Equal(current, content), nil
 }
 
-func (f *Files) writePlaylistTemporary(name string, content []byte) error {
+func (f *Files) writePlaylistTemporary(ctx context.Context, name string, content []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	staged, err := f.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return fmt.Errorf("create managed playlist temporary file: %w", err)
@@ -229,9 +237,17 @@ func (f *Files) writePlaylistTemporary(name string, content []byte) error {
 		_ = staged.Close()
 		return fmt.Errorf("write managed playlist: %w", io.ErrShortWrite)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = staged.Close()
+		return err
+	}
 	if err := staged.Sync(); err != nil {
 		_ = staged.Close()
 		return fmt.Errorf("sync managed playlist: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = staged.Close()
+		return err
 	}
 	if err := staged.Close(); err != nil {
 		return fmt.Errorf("close managed playlist temporary file: %w", err)

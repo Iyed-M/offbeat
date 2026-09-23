@@ -2,6 +2,8 @@ package managed_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,7 +200,7 @@ func TestManagedRootRejectsSymlinkDirectories(t *testing.T) {
 	}
 }
 
-func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T) {
+func TestPlaylistReconciliationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	files, err := managed.Open(root)
 	if err != nil {
@@ -207,9 +209,9 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 	defer files.Close()
 
 	content := []byte("#EXTM3U\n../tracks/example.wav\n")
-	changed, err := files.PublishPlaylist("Mix.m3u8", content)
-	if err != nil || !changed {
-		t.Fatalf("first publish = %v, %v", changed, err)
+	desired := map[string][]byte{"Mix.m3u8": content}
+	if err := files.ReconcilePlaylists(context.Background(), desired); err != nil {
+		t.Fatalf("first reconciliation: %v", err)
 	}
 	playlistPath := filepath.Join(root, "playlists", "Mix.m3u8")
 	before, err := os.Stat(playlistPath)
@@ -217,11 +219,10 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 		t.Fatal(err)
 	}
 	// Filesystems with coarse timestamps can hide a rewrite, so compare the
-	// inode as well as requiring the publication boundary to report a no-op.
+	// inode as well as the modification time.
 	time.Sleep(time.Millisecond)
-	changed, err = files.PublishPlaylist("Mix.m3u8", append([]byte(nil), content...))
-	if err != nil || changed {
-		t.Fatalf("identical publish = %v, %v", changed, err)
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Mix.m3u8": append([]byte(nil), content...)}); err != nil {
+		t.Fatalf("identical reconciliation: %v", err)
 	}
 	after, err := os.Stat(playlistPath)
 	if err != nil {
@@ -238,7 +239,7 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 	if err := os.Symlink(outsideFile, filepath.Join(root, "playlists", "Linked.m3u8")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := files.PublishPlaylist("Linked.m3u8", content); err == nil {
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Linked.m3u8": content}); err == nil {
 		t.Fatal("published over destination symlink")
 	}
 	if got, err := os.ReadFile(outsideFile); err != nil || string(got) != "untouched" {
@@ -246,15 +247,18 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 	}
 
 	for _, filename := range []string{"../escape.m3u8", `/escape.m3u8`, `dir\\escape.m3u8`, "not-a-playlist"} {
-		if _, err := files.PublishPlaylist(filename, content); err == nil {
+		if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{filename: content}); err == nil {
 			t.Fatalf("accepted unsafe filename %q", filename)
 		}
+	}
+	if err := os.Remove(filepath.Join(root, "playlists", "Linked.m3u8")); err != nil {
+		t.Fatal(err)
 	}
 	blocked := filepath.Join(root, "playlists", "Blocked.m3u8")
 	if err := os.Mkdir(blocked, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := files.PublishPlaylist("Blocked.m3u8", content); err == nil {
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Blocked.m3u8": content}); err == nil {
 		t.Fatal("published over non-regular destination")
 	}
 	playlistEntries, err := os.ReadDir(filepath.Join(root, "playlists"))
@@ -273,7 +277,7 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 	if err := os.Symlink(outside, filepath.Join(root, "playlists")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := files.PublishPlaylist("Escape.m3u8", content); err == nil {
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Escape.m3u8": content}); err == nil {
 		t.Fatal("published through playlist-directory symlink")
 	}
 	entries, err := os.ReadDir(outside)
@@ -289,4 +293,128 @@ func TestPlaylistPublicationIsConfinedAtomicAndSkipsIdenticalBytes(t *testing.T)
 			t.Fatalf("temporary playlist leaked: %s", entry.Name())
 		}
 	}
+}
+
+func TestPlaylistReconciliationRemovesInterruptedTemporaryFiles(t *testing.T) {
+	root := t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+
+	playlistsDir := filepath.Join(root, "playlists")
+	orphan := filepath.Join(playlistsDir, ".publish-interrupted")
+	if err := os.WriteFile(orphan, []byte("staged playlist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(playlistsDir, ".keep")
+	if err := os.WriteFile(unrelated, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{
+		"Liked Songs.m3u8": []byte("#EXTM3U\n"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("interrupted temporary file remains: %v", err)
+	}
+	if got, err := os.ReadFile(unrelated); err != nil || string(got) != "untouched" {
+		t.Fatalf("unrelated playlist entry = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(playlistsDir, "Liked Songs.m3u8")); err != nil || string(got) != "#EXTM3U\n" {
+		t.Fatalf("reconciled playlist = %q, %v", got, err)
+	}
+}
+
+func TestPlaylistReconciliationRefusesUnsafeInterruptedTemporaryFile(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+
+	outsideFile := filepath.Join(outside, "sentinel")
+	if err := os.WriteFile(outsideFile, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unsafeTemporary := filepath.Join(root, "playlists", ".publish-interrupted")
+	if err := os.Symlink(outsideFile, unsafeTemporary); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Liked Songs.m3u8": []byte("#EXTM3U\n")}); err == nil {
+		t.Fatal("accepted unsafe interrupted temporary file")
+	}
+	if got, err := os.ReadFile(outsideFile); err != nil || string(got) != "untouched" {
+		t.Fatalf("outside file = %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "playlists", "Liked Songs.m3u8")); !os.IsNotExist(err) {
+		t.Fatalf("published output despite unsafe temporary file: %v", err)
+	}
+}
+
+func TestPlaylistReconciliationCleansUpWhenCanceledDuringStaging(t *testing.T) {
+	root := t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+
+	oldContent := []byte("#EXTM3U\n../tracks/old.wav\n")
+	if err := files.ReconcilePlaylists(context.Background(), map[string][]byte{"Old.m3u8": oldContent}); err != nil {
+		t.Fatal(err)
+	}
+	playlistsDir := filepath.Join(root, "playlists")
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canceled := &cancelWhenPlaylistTemporaryAppears{
+		Context: base,
+		cancel:  cancel,
+		dir:     playlistsDir,
+	}
+	if err := files.ReconcilePlaylists(canceled, map[string][]byte{"New.m3u8": []byte("#EXTM3U\n")}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reconciliation error = %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(playlistsDir, "Old.m3u8")); err != nil || !bytes.Equal(got, oldContent) {
+		t.Fatalf("previous playlist = %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(playlistsDir, "New.m3u8")); !os.IsNotExist(err) {
+		t.Fatalf("canceled reconciliation published new output: %v", err)
+	}
+	entries, err := os.ReadDir(playlistsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".publish-") {
+			t.Fatalf("canceled reconciliation leaked temporary file %q", entry.Name())
+		}
+	}
+}
+
+type cancelWhenPlaylistTemporaryAppears struct {
+	context.Context
+	cancel context.CancelFunc
+	dir    string
+}
+
+func (c *cancelWhenPlaylistTemporaryAppears) Err() error {
+	if err := c.Context.Err(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".publish-") {
+			c.cancel()
+			return c.Context.Err()
+		}
+	}
+	return nil
 }

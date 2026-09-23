@@ -27,6 +27,8 @@ func TestSpotifySyncMaterializesIdentitySafePlaylistFilenameGoldenDirectory(t *t
 		{"uri": "spotify:playlist:liked", "name": "Liked Songs", "entries": []any{}},
 		{"uri": "spotify:playlist:case-a", "name": "Case", "entries": []any{}},
 		{"uri": "spotify:playlist:case-b", "name": "case", "entries": []any{}},
+		{"uri": "spotify:playlist:casefold-a", "name": "S", "entries": []any{}},
+		{"uri": "spotify:playlist:casefold-b", "name": "ſ", "entries": []any{}},
 		{"uri": "spotify:playlist:norm-a", "name": "Café", "entries": []any{}},
 		{"uri": "spotify:playlist:norm-b", "name": "Cafe\u0301", "entries": []any{}},
 		{"uri": "spotify:playlist:unicode", "name": "日本語 믹스", "entries": []any{}},
@@ -53,9 +55,11 @@ func TestSpotifySyncMaterializesIdentitySafePlaylistFilenameGoldenDirectory(t *t
 		"Mix~a1cdca483047~3b5ed37b98cc-2.m3u8",
 		"Playlist~a64409cf70a0.m3u8",
 		"Playlist~3c21fd2fa5b5.m3u8",
+		"S~d541cd50a5a9.m3u8",
 		"case~361ea07f47ea.m3u8",
 		strings.Repeat("界", 66) + ".m3u8",
 		"日本語 믹스.m3u8",
+		"ſ~aac73278b2b9.m3u8",
 	}
 	playlistsDir := filepath.Join(d.Cfg.Paths.MusicRoot, "playlists")
 	assertHeaderOnlyPlaylistDirectory(t, playlistsDir, want)
