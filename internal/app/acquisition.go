@@ -15,6 +15,51 @@ func acquisitionResult(work db.AcquisitionWork) ipc.AcquisitionResult {
 	return ipc.AcquisitionResult{ID: work.ID, TrackURI: work.TrackURI, State: work.State, Error: work.Error}
 }
 
+const youtubeInspectionTimeout = 2 * time.Minute
+
+func (d *Daemon) handleAcquisitionInspection(ctx context.Context, req ipc.Request) (any, error) {
+	if req.AcquisitionInspect == nil {
+		return nil, ipc.NewError(ipc.CodeInvalidRequest, "acquire.inspect requires track_uri")
+	}
+	if err := ipc.ValidateAcquisitionTrackURI(req.AcquisitionInspect.TrackURI); err != nil {
+		return nil, ipc.NewError(ipc.CodeInvalidRequest, err.Error())
+	}
+
+	// Desired Spotify state changes under managedMu. Copy the small immutable
+	// metadata value, then release the mutex before starting the external search.
+	d.managedMu.Lock()
+	if d.DB == nil || d.inspector == nil {
+		d.managedMu.Unlock()
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "YouTube inspection is not ready")
+	}
+	track, err := d.DB.DesiredTrack(ctx, req.AcquisitionInspect.TrackURI)
+	d.managedMu.Unlock()
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "track is not currently desired")
+	}
+	if err != nil {
+		return nil, ipc.NewError(ipc.CodeInternal, "could not read desired track")
+	}
+
+	searchCtx, cancel := context.WithTimeout(ctx, youtubeInspectionTimeout)
+	defer cancel()
+	report, err := d.inspector.Inspect(searchCtx, track)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection timed out")
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection canceled")
+		}
+		return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection failed: "+err.Error())
+	}
+	encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: report})
+	if err != nil || len(encoded)+1 > ipc.MaxMessageBytes {
+		return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection report exceeds the Control protocol response limit")
+	}
+	return report, nil
+}
+
 func (d *Daemon) handleAcquisition(ctx context.Context, req ipc.Request) (any, error) {
 	d.managedMu.Lock()
 	defer d.managedMu.Unlock()

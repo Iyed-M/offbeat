@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Iyed-M/offbeat/internal/config"
@@ -27,6 +28,11 @@ const (
 	youtubeDurationFloorMS   = 12_000
 	youtubeDurationPercent   = 5
 	youtubeDurationCeilingMS = 20_000
+)
+
+const (
+	ResolutionInspectionVersion = 1
+	MaxYouTubeSearchCandidates  = youtubeCandidateLimit
 )
 
 // ErrUnresolved means the bounded YouTube result set did not contain one
@@ -50,14 +56,14 @@ const (
 // ResolutionDiagnostic is the bounded persisted explanation for an
 // unresolved search. It deliberately contains aggregate counts only.
 type ResolutionDiagnostic struct {
-	Reason           ResolutionReason
-	Candidates       int
-	MetadataRejected int
-	TitleRejected    int
-	ArtistRejected   int
-	VersionRejected  int
-	DurationRejected int
-	Eligible         int
+	Reason           ResolutionReason `json:"reason,omitempty"`
+	Candidates       int              `json:"candidates"`
+	MetadataRejected int              `json:"metadata_rejected"`
+	TitleRejected    int              `json:"title_rejected"`
+	ArtistRejected   int              `json:"artist_rejected"`
+	VersionRejected  int              `json:"version_rejected"`
+	DurationRejected int              `json:"duration_rejected"`
+	Eligible         int              `json:"eligible"`
 }
 
 func (d *ResolutionDiagnostic) Error() string {
@@ -71,18 +77,27 @@ type Resolver interface {
 	Resolve(context.Context, desired.Track) (string, error)
 }
 
+// Inspector performs a fresh metadata-only search and exposes the evidence
+// consumed by the same decision used by Resolver.
+type Inspector interface {
+	Inspect(context.Context, desired.Track) (ResolutionInspection, error)
+}
+
 // YTDLPResolver uses yt-dlp only as a bounded YouTube search/metadata seam.
 // Media retrieval remains the separate Retriever boundary.
 type YTDLPResolver struct {
 	ytdlp   string
 	command func(context.Context, string, ...string) *exec.Cmd
+	now     func() time.Time
 }
 
-func NewYouTubeResolver(cfg config.Downloader) Resolver {
-	return &YTDLPResolver{ytdlp: cfg.YTDLPPath, command: exec.CommandContext}
+func NewYouTubeResolver(cfg config.Downloader) *YTDLPResolver {
+	return &YTDLPResolver{ytdlp: cfg.YTDLPPath, command: exec.CommandContext, now: time.Now}
 }
 
-type youtubeCandidate struct {
+// YouTubeSearchResult contains only fields observed in yt-dlp's bounded search
+// response. Inferred policy evidence is kept separately in ResolutionInspection.
+type YouTubeSearchResult struct {
 	ID           string  `json:"id"`
 	Title        string  `json:"title"`
 	Channel      string  `json:"channel"`
@@ -92,17 +107,102 @@ type youtubeCandidate struct {
 	LiveStatus   string  `json:"live_status"`
 }
 
+type youtubeCandidate = YouTubeSearchResult
+
+// InspectionTrack is the exact Desired Spotify metadata evaluated by policy.
+type InspectionNamedURI struct {
+	URI  string `json:"uri"`
+	Name string `json:"name"`
+}
+
+type InspectionTrack struct {
+	URI        string               `json:"uri"`
+	Title      string               `json:"title"`
+	Artists    []InspectionNamedURI `json:"artists"`
+	Album      InspectionNamedURI   `json:"album"`
+	DurationMS int                  `json:"duration_ms"`
+}
+
+type InspectionSearch struct {
+	CandidateLimit int                   `json:"candidate_limit"`
+	RawResults     []YouTubeSearchResult `json:"raw_results"`
+}
+
+// CandidateEvidence describes one unique video ID. Duplicate result positions
+// remain visible without allowing the duplicate to influence ranking.
+type CandidateEvidence struct {
+	VideoID                  string           `json:"video_id"`
+	FirstSearchPosition      int              `json:"first_search_position"`
+	DuplicateSearchPositions []int            `json:"duplicate_search_positions"`
+	CandidateVersionMarkers  []string         `json:"candidate_version_markers"`
+	Eligible                 bool             `json:"eligible"`
+	RejectionReason          ResolutionReason `json:"rejection_reason,omitempty"`
+	TitleScore               *int             `json:"title_score,omitempty"`
+	ArtistScore              *int             `json:"artist_score,omitempty"`
+	DurationScore            *int             `json:"duration_score,omitempty"`
+	DurationDeltaMS          *int             `json:"duration_delta_ms,omitempty"`
+	Score                    *int             `json:"score,omitempty"`
+	Rank                     *int             `json:"rank,omitempty"`
+}
+
+type ResolutionDecision struct {
+	AcceptanceFloor  int              `json:"acceptance_floor"`
+	RunnerUpMargin   int              `json:"runner_up_margin"`
+	WinnerVideoID    string           `json:"winner_video_id,omitempty"`
+	WinnerScore      *int             `json:"winner_score,omitempty"`
+	RunnerUpVideoID  string           `json:"runner_up_video_id,omitempty"`
+	RunnerUpScore    *int             `json:"runner_up_score,omitempty"`
+	ScoreGap         *int             `json:"score_gap,omitempty"`
+	FloorPassed      *bool            `json:"floor_passed,omitempty"`
+	MarginPassed     *bool            `json:"margin_passed,omitempty"`
+	SelectedURL      string           `json:"selected_url,omitempty"`
+	UnresolvedReason ResolutionReason `json:"unresolved_reason,omitempty"`
+}
+
+// ResolutionInspection is a bounded, machine-readable report of one fresh
+// search. It is diagnostic output, never durable Acquisition state.
+type ResolutionInspection struct {
+	ReportVersion int                  `json:"report_version"`
+	FreshSearch   bool                 `json:"fresh_search"`
+	CapturedAt    time.Time            `json:"captured_at"`
+	Track         InspectionTrack      `json:"track"`
+	Query         YouTubeQuery         `json:"query"`
+	Search        InspectionSearch     `json:"search"`
+	Candidates    []CandidateEvidence  `json:"candidates"`
+	Decision      ResolutionDecision   `json:"decision"`
+	Diagnostic    ResolutionDiagnostic `json:"diagnostic"`
+}
+
 func (r *YTDLPResolver) Resolve(ctx context.Context, track desired.Track) (string, error) {
+	report, err := r.Inspect(ctx, track)
+	if err != nil {
+		return "", err
+	}
+	return selectionFromInspection(report)
+}
+
+func selectionFromInspection(report ResolutionInspection) (string, error) {
+	if report.Decision.SelectedURL != "" {
+		return report.Decision.SelectedURL, nil
+	}
+	diagnostic := report.Diagnostic
+	return "", &diagnostic
+}
+
+func (r *YTDLPResolver) Inspect(ctx context.Context, track desired.Track) (ResolutionInspection, error) {
 	if r == nil || r.ytdlp == "" {
-		return "", errors.New("YouTube resolver is not configured")
+		return ResolutionInspection{}, errors.New("YouTube resolver is not configured")
 	}
 	query := BuildYouTubeQuery(track)
 	if query.Text == "" || query.DurationMS <= 0 {
-		return "", &ResolutionDiagnostic{Reason: ResolutionMetadata}
+		report := inspectYouTubeCandidates(track, query, nil, r.currentTime())
+		report.Diagnostic.Reason = ResolutionMetadata
+		report.Decision.UnresolvedReason = ResolutionMetadata
+		return report, nil
 	}
 	ytdlp, err := configuredExecutable(r.ytdlp, "yt-dlp")
 	if err != nil {
-		return "", err
+		return ResolutionInspection{}, err
 	}
 	args := []string{
 		"--no-config", "--no-plugin-dirs", "--flat-playlist", "--dump-single-json",
@@ -111,24 +211,31 @@ func (r *YTDLPResolver) Resolve(ctx context.Context, track desired.Track) (strin
 	}
 	output, err := runProcessOutput(ctx, r.command(ctx, ytdlp, args...), 1<<20)
 	if err != nil {
-		return "", fmt.Errorf("search YouTube: %w", err)
+		return ResolutionInspection{}, fmt.Errorf("search YouTube: %w", err)
 	}
 	var result struct {
 		Entries []youtubeCandidate `json:"entries"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
-		return "", errors.New("decode YouTube search results")
+		return ResolutionInspection{}, errors.New("decode YouTube search results")
 	}
-	return selectYouTubeCandidate(track, result.Entries)
+	return inspectYouTubeCandidates(track, query, result.Entries, r.currentTime()), nil
+}
+
+func (r *YTDLPResolver) currentTime() time.Time {
+	if r.now == nil {
+		return time.Now().UTC()
+	}
+	return r.now().UTC()
 }
 
 // YouTubeQuery is the deterministic resolver-local projection of Spotify
 // metadata. Duration and markers guide eligibility without polluting search
 // text with terms that make YouTube search less predictable.
 type YouTubeQuery struct {
-	Text           string
-	DurationMS     int
-	VersionMarkers []string
+	Text           string   `json:"text"`
+	DurationMS     int      `json:"duration_ms"`
+	VersionMarkers []string `json:"version_markers"`
 }
 
 func BuildYouTubeQuery(track desired.Track) YouTubeQuery {
@@ -154,9 +261,13 @@ func BuildYouTubeQuery(track desired.Track) YouTubeQuery {
 var youtubeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
 type candidateRank struct {
-	candidate youtubeCandidate
-	score     int
-	deltaMS   int
+	candidate     youtubeCandidate
+	score         int
+	deltaMS       int
+	titleScore    int
+	artistScore   int
+	durationScore int
+	reportIndex   int
 }
 
 type candidateRejection int
@@ -170,20 +281,57 @@ const (
 )
 
 func selectYouTubeCandidate(track desired.Track, candidates []youtubeCandidate) (string, error) {
+	report := inspectYouTubeCandidates(track, BuildYouTubeQuery(track), candidates, time.Time{})
+	return selectionFromInspection(report)
+}
+
+func inspectYouTubeCandidates(track desired.Track, query YouTubeQuery, candidates []youtubeCandidate, capturedAt time.Time) ResolutionInspection {
+	if len(candidates) > youtubeCandidateLimit {
+		candidates = candidates[:youtubeCandidateLimit]
+	}
+	artists := make([]InspectionNamedURI, 0, len(track.Artists))
+	for _, artist := range track.Artists {
+		artists = append(artists, InspectionNamedURI{URI: artist.URI, Name: artist.Name})
+	}
+	report := ResolutionInspection{
+		ReportVersion: ResolutionInspectionVersion,
+		FreshSearch:   true,
+		CapturedAt:    capturedAt,
+		Track:         InspectionTrack{URI: track.URI, Title: track.Name, Artists: artists, Album: InspectionNamedURI{URI: track.Album.URI, Name: track.Album.Name}, DurationMS: track.DurationMS},
+		Query:         query,
+		Search:        InspectionSearch{CandidateLimit: youtubeCandidateLimit, RawResults: append([]YouTubeSearchResult(nil), candidates...)},
+		Candidates:    []CandidateEvidence{},
+		Decision:      ResolutionDecision{AcceptanceFloor: youtubeAcceptanceFloor, RunnerUpMargin: youtubeRunnerUpMargin},
+	}
 	seen := make(map[string]struct{})
+	seenIndex := make(map[string]int)
 	ranked := make([]candidateRank, 0, len(candidates))
-	diagnostic := &ResolutionDiagnostic{}
-	for _, candidate := range candidates {
+	diagnostic := ResolutionDiagnostic{}
+	for position, candidate := range candidates {
 		if _, ok := seen[candidate.ID]; ok {
+			index := seenIndex[candidate.ID]
+			report.Candidates[index].DuplicateSearchPositions = append(report.Candidates[index].DuplicateSearchPositions, position+1)
 			continue
 		}
 		seen[candidate.ID] = struct{}{}
+		seenIndex[candidate.ID] = len(report.Candidates)
+		evidence := CandidateEvidence{VideoID: candidate.ID, FirstSearchPosition: position + 1, DuplicateSearchPositions: []int{}, CandidateVersionMarkers: orderedMarkerSet(markerSet(candidateVersionText(candidate.Title, track.Artists)))}
+		report.Candidates = append(report.Candidates, evidence)
 		diagnostic.Candidates++
 		rank, rejection, ok := rankYouTubeCandidate(track, candidate)
 		if ok {
+			rank.reportIndex = len(report.Candidates) - 1
 			ranked = append(ranked, rank)
+			evidence := &report.Candidates[rank.reportIndex]
+			evidence.Eligible = true
+			evidence.TitleScore = intPointer(rank.titleScore)
+			evidence.ArtistScore = intPointer(rank.artistScore)
+			evidence.DurationScore = intPointer(rank.durationScore)
+			evidence.DurationDeltaMS = intPointer(rank.deltaMS)
+			evidence.Score = intPointer(rank.score)
 			continue
 		}
+		report.Candidates[len(report.Candidates)-1].RejectionReason = rejectionReason(rejection)
 		switch rejection {
 		case rejectionTitle:
 			diagnostic.TitleRejected++
@@ -212,7 +360,9 @@ func selectYouTubeCandidate(track desired.Track, candidates []youtubeCandidate) 
 		case diagnostic.DurationRejected > 0 && diagnostic.Candidates == diagnostic.DurationRejected:
 			diagnostic.Reason = ResolutionDuration
 		}
-		return "", diagnostic
+		report.Diagnostic = diagnostic
+		report.Decision.UnresolvedReason = diagnostic.Reason
+		return report
 	}
 	sort.Slice(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {
@@ -223,16 +373,65 @@ func selectYouTubeCandidate(track desired.Track, candidates []youtubeCandidate) 
 		}
 		return ranked[i].candidate.ID < ranked[j].candidate.ID
 	})
+	for index := range ranked {
+		report.Candidates[ranked[index].reportIndex].Rank = intPointer(index + 1)
+	}
+	report.Decision.WinnerVideoID = ranked[0].candidate.ID
+	report.Decision.WinnerScore = intPointer(ranked[0].score)
+	floorPassed := ranked[0].score >= youtubeAcceptanceFloor
+	report.Decision.FloorPassed = &floorPassed
+	marginPassed := true
+	report.Decision.MarginPassed = &marginPassed
+	if len(ranked) > 1 {
+		report.Decision.RunnerUpVideoID = ranked[1].candidate.ID
+		report.Decision.RunnerUpScore = intPointer(ranked[1].score)
+		report.Decision.ScoreGap = intPointer(ranked[0].score - ranked[1].score)
+		marginPassed = ranked[0].score-ranked[1].score >= youtubeRunnerUpMargin
+		report.Decision.MarginPassed = &marginPassed
+	}
 	if ranked[0].score < youtubeAcceptanceFloor {
 		diagnostic.Reason = ResolutionWeakWinner
-		return "", diagnostic
+		report.Diagnostic = diagnostic
+		report.Decision.UnresolvedReason = diagnostic.Reason
+		return report
 	}
 	if len(ranked) > 1 && ranked[0].score-ranked[1].score < youtubeRunnerUpMargin {
 		diagnostic.Reason = ResolutionAmbiguous
-		return "", diagnostic
+		report.Diagnostic = diagnostic
+		report.Decision.UnresolvedReason = diagnostic.Reason
+		return report
 	}
-	return "https://www.youtube.com/watch?v=" + ranked[0].candidate.ID, nil
+	report.Decision.SelectedURL = "https://www.youtube.com/watch?v=" + ranked[0].candidate.ID
+	report.Diagnostic = diagnostic
+	return report
 }
+
+func rejectionReason(rejection candidateRejection) ResolutionReason {
+	switch rejection {
+	case rejectionTitle:
+		return ResolutionTitle
+	case rejectionArtist:
+		return ResolutionArtist
+	case rejectionVersion:
+		return ResolutionVersion
+	case rejectionDuration:
+		return ResolutionDuration
+	default:
+		return ResolutionMetadata
+	}
+}
+
+func orderedMarkerSet(markers map[string]bool) []string {
+	result := make([]string, 0, len(markers))
+	for _, marker := range versionMarkers {
+		if markers[marker.name] {
+			result = append(result, marker.name)
+		}
+	}
+	return result
+}
+
+func intPointer(value int) *int { return &value }
 
 var versionMarkers = []struct {
 	name  string
@@ -317,7 +516,7 @@ func rankYouTubeCandidate(track desired.Track, candidate youtubeCandidate) (cand
 	}
 	durationScore := 100 - delta*30/allowed
 	score := (titleScore*youtubeTitleWeight + artistScore*youtubeArtistWeight + durationScore*youtubeDurationWeight) / 100
-	return candidateRank{candidate: candidate, score: score, deltaMS: delta}, 0, true
+	return candidateRank{candidate: candidate, score: score, deltaMS: delta, titleScore: titleScore, artistScore: artistScore, durationScore: durationScore}, 0, true
 }
 
 func trackTitleIdentityTokens(value string) []string {

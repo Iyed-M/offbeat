@@ -62,6 +62,9 @@ func main() {
 		}
 		os.Exit(runMissing(configPath, homeDir))
 	case "acquire":
+		if len(rest) == 2 && rest[0] == "inspect" {
+			os.Exit(runAcquireInspect(configPath, homeDir, rest[1]))
+		}
 		if len(rest) == 1 && rest[0] == "missing" {
 			os.Exit(runAcquireMissing(configPath, homeDir))
 		}
@@ -80,7 +83,7 @@ func main() {
 		if len(rest) == 2 {
 			os.Exit(runAcquire(configPath, homeDir, rest[0], rest[1]))
 		}
-		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved")
+		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire inspect <spotify-uri> | offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved")
 		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)

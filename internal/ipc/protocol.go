@@ -56,14 +56,15 @@ type Request struct {
 	// versionSet records that strict JSON decoding validated the required
 	// version field. It lets the dispatcher distinguish an invalid request
 	// from an explicitly unsupported version.
-	versionSet        bool
-	Version           int                     `json:"version"`
-	Command           string                  `json:"command"`
-	Missing           *MissingRequest         `json:"missing,omitempty"`
-	Acquire           *AcquireRequest         `json:"acquire,omitempty"`
-	AcquisitionStatus *AcquisitionIDRequest   `json:"acquisition_status,omitempty"`
-	AcquisitionList   *AcquisitionListRequest `json:"acquisition_list,omitempty"`
-	AcquisitionRetry  *AcquisitionIDRequest   `json:"acquisition_retry,omitempty"`
+	versionSet         bool
+	Version            int                      `json:"version"`
+	Command            string                   `json:"command"`
+	Missing            *MissingRequest          `json:"missing,omitempty"`
+	Acquire            *AcquireRequest          `json:"acquire,omitempty"`
+	AcquisitionInspect *AcquisitionTrackRequest `json:"acquisition_inspect,omitempty"`
+	AcquisitionStatus  *AcquisitionIDRequest    `json:"acquisition_status,omitempty"`
+	AcquisitionList    *AcquisitionListRequest  `json:"acquisition_list,omitempty"`
+	AcquisitionRetry   *AcquisitionIDRequest    `json:"acquisition_retry,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -75,7 +76,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -131,6 +132,20 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		}
 		acquire = &parsed
 	}
+	var acquisitionInspect *AcquisitionTrackRequest
+	if raw, ok := fields["acquisition_inspect"]; ok {
+		if parsedCommand != "acquire.inspect" || isJSONNull(raw) {
+			return errors.New("acquisition_inspect arguments are only valid for acquire.inspect requests")
+		}
+		var parsed AcquisitionTrackRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateAcquisitionTrackURI(parsed.TrackURI); err != nil {
+			return err
+		}
+		acquisitionInspect = &parsed
+	}
 	parseAcquisitionID := func(field, command string) (*AcquisitionIDRequest, error) {
 		raw, ok := fields[field]
 		if !ok {
@@ -173,6 +188,9 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if parsedCommand == "acquire" && acquire == nil {
 		return errors.New("acquire request requires acquire arguments")
 	}
+	if parsedCommand == "acquire.inspect" && acquisitionInspect == nil {
+		return errors.New("acquire.inspect request requires acquisition_inspect arguments")
+	}
 	if parsedCommand == "acquire.retry" && acquisitionRetry == nil {
 		return errors.New("acquire.retry request requires acquisition_retry arguments")
 	}
@@ -182,6 +200,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	r.Command = parsedCommand
 	r.Missing = missing
 	r.Acquire = acquire
+	r.AcquisitionInspect = acquisitionInspect
 	r.AcquisitionStatus = acquisitionStatus
 	r.AcquisitionList = acquisitionList
 	r.AcquisitionRetry = acquisitionRetry

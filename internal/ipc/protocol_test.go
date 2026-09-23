@@ -76,6 +76,15 @@ func TestDecodeAcquisitionRequests(t *testing.T) {
 			},
 		},
 		{
+			name:    "inspect",
+			payload: `{"version":1,"command":"acquire.inspect","acquisition_inspect":{"track_uri":"spotify:track:one"}}`,
+			check: func(t *testing.T, req ipc.Request) {
+				if req.AcquisitionInspect == nil || req.AcquisitionInspect.TrackURI != "spotify:track:one" {
+					t.Fatalf("AcquisitionInspect = %#v", req.AcquisitionInspect)
+				}
+			},
+		},
+		{
 			name:    "status",
 			payload: `{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":42}}`,
 			check: func(t *testing.T, req ipc.Request) {
@@ -143,6 +152,10 @@ func TestDecodeRejectsInvalidAcquisitionRequestShapes(t *testing.T) {
 		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3#fragment"}}`,
 		`{"version":1,"command":"acquire","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3","extra":true}}`,
 		`{"version":1,"command":"status","acquire":{"track_uri":"spotify:track:one","source_url":"https://media.example.test/one.mp3"}}`,
+		`{"version":1,"command":"acquire.inspect"}`,
+		`{"version":1,"command":"acquire.inspect","acquisition_inspect":null}`,
+		`{"version":1,"command":"acquire.inspect","acquisition_inspect":{"track_uri":"spotify:playlist:one"}}`,
+		`{"version":1,"command":"status","acquisition_inspect":{"track_uri":"spotify:track:one"}}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":null}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":{}}`,
 		`{"version":1,"command":"acquire.status","acquisition_status":{"acquisition_id":0}}`,

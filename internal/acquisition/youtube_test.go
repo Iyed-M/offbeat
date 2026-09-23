@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/desired"
@@ -15,6 +16,52 @@ import (
 
 func youtubeTrack(name string, duration int) desired.Track {
 	return desired.Track{Name: name, Artists: []desired.NamedURI{{Name: "Massive Attack"}}, DurationMS: duration}
+}
+
+func TestInspectYouTubeCandidatesSeparatesRawEvidenceFromSharedDecision(t *testing.T) {
+	track := youtubeTrack("Teardrop", 330_000)
+	capturedAt := time.Date(2026, 9, 23, 12, 30, 0, 0, time.UTC)
+	candidates := []youtubeCandidate{
+		{ID: "ambiguous01", Title: "Massive Attack - Teardrop", Channel: "Massive Attack", Duration: 330},
+		{ID: "ambiguous01", Title: "duplicate raw result", Channel: "Other", Duration: 1},
+		{ID: "wronglive01", Title: "Massive Attack - Teardrop (Live)", Uploader: "Massive Attack", Duration: 330},
+		{ID: "ambiguous02", Title: "Massive Attack - Teardrop (Official Audio)", Uploader: "Massive Attack", Duration: 329},
+	}
+
+	report := inspectYouTubeCandidates(track, BuildYouTubeQuery(track), candidates, capturedAt)
+	if !report.FreshSearch || !report.CapturedAt.Equal(capturedAt) || report.Search.CandidateLimit != youtubeCandidateLimit {
+		t.Fatalf("report provenance = %#v", report)
+	}
+	if len(report.Search.RawResults) != 4 || report.Search.RawResults[1].Title != "duplicate raw result" {
+		t.Fatalf("raw results = %#v", report.Search.RawResults)
+	}
+	if len(report.Candidates) != 3 || report.Candidates[0].FirstSearchPosition != 1 || len(report.Candidates[0].DuplicateSearchPositions) != 1 || report.Candidates[0].DuplicateSearchPositions[0] != 2 {
+		t.Fatalf("unique candidates = %#v", report.Candidates)
+	}
+	if !report.Candidates[0].Eligible || report.Candidates[0].Score == nil || report.Candidates[0].TitleScore == nil || report.Candidates[0].ArtistScore == nil || report.Candidates[0].DurationScore == nil {
+		t.Fatalf("eligible evidence = %#v", report.Candidates[0])
+	}
+	if report.Candidates[1].Eligible || report.Candidates[1].RejectionReason != "version_conflict" || len(report.Candidates[1].CandidateVersionMarkers) != 1 || report.Candidates[1].CandidateVersionMarkers[0] != "live" {
+		t.Fatalf("rejected evidence = %#v", report.Candidates[1])
+	}
+	if report.Decision.UnresolvedReason != ResolutionAmbiguous || report.Decision.SelectedURL != "" || report.Decision.AcceptanceFloor != youtubeAcceptanceFloor || report.Decision.RunnerUpMargin != youtubeRunnerUpMargin || report.Decision.FloorPassed == nil || !*report.Decision.FloorPassed || report.Decision.MarginPassed == nil || *report.Decision.MarginPassed {
+		t.Fatalf("decision = %#v", report.Decision)
+	}
+	if _, err := selectYouTubeCandidate(track, candidates); err == nil || err.Error() != report.Diagnostic.Error() {
+		t.Fatalf("Resolve decision error = %v, report diagnostic = %#v", err, report.Diagnostic)
+	}
+}
+
+func TestInspectYouTubeCandidatesEnforcesSearchBound(t *testing.T) {
+	candidates := make([]youtubeCandidate, youtubeCandidateLimit+1)
+	for i := range candidates {
+		candidates[i] = youtubeCandidate{ID: fmt.Sprintf("bounded%04d", i), Title: "Artist - Song", Channel: "Artist", Duration: 100}
+	}
+	track := desired.Track{Name: "Song", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 100_000}
+	report := inspectYouTubeCandidates(track, BuildYouTubeQuery(track), candidates, time.Now())
+	if len(report.Search.RawResults) != youtubeCandidateLimit || len(report.Candidates) != youtubeCandidateLimit {
+		t.Fatalf("bounded report has %d raw and %d unique candidates", len(report.Search.RawResults), len(report.Candidates))
+	}
 }
 
 func TestYouTubeResolverRealAuthorizedFixture(t *testing.T) {
@@ -93,6 +140,52 @@ func TestYTDLPResolverReportsMissingConfiguredExecutable(t *testing.T) {
 	_, err := NewYouTubeResolver(config.Downloader{YTDLPPath: "missing-yt-dlp"}).Resolve(context.Background(), youtubeTrack("Teardrop", 330_000))
 	if err == nil || err.Error() != "configured yt-dlp executable not found" {
 		t.Fatalf("Resolve error = %v", err)
+	}
+}
+
+func TestYTDLPInspectionSearchHonorsCancellation(t *testing.T) {
+	tools := t.TempDir()
+	startedFile := tools + "/started"
+	resolver := NewYouTubeResolver(config.Downloader{YTDLPPath: writeTool(t, tools, "yt-dlp-search", fmt.Sprintf("touch %q\nsleep 30", startedFile))})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := resolver.Inspect(ctx, youtubeTrack("Teardrop", 330_000))
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("inspection tool did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	started := time.Now()
+	cancel()
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Inspect error = %v, want context cancellation", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("canceled inspection took %v", elapsed)
+	}
+}
+
+func TestYTDLPInspectionAndResolveAgreeOnCapturedCandidates(t *testing.T) {
+	tools := t.TempDir()
+	body := `printf '%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Massive Attack - Teardrop","channel":"Massive Attack","duration":330},{"id":"bbbbbbbbbbb","title":"Massive Attack - Teardrop (Live)","channel":"Massive Attack","duration":330}]}'`
+	resolver := NewYouTubeResolver(config.Downloader{YTDLPPath: writeTool(t, tools, "yt-dlp-search", body)})
+	track := youtubeTrack("Teardrop", 330_000)
+	report, err := resolver.Inspect(context.Background(), track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := resolver.Resolve(context.Background(), track)
+	if err != nil || selected != report.Decision.SelectedURL || selected != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+		t.Fatalf("Resolve = %q, %v; inspection decision = %#v", selected, err, report.Decision)
 	}
 }
 
@@ -218,6 +311,12 @@ func TestSelectYouTubeCandidateScoredFixtureCorpus(t *testing.T) {
 			wantReason: ResolutionDuration,
 		},
 		{
+			name:       "missing candidate metadata",
+			track:      youtubeTrack("Teardrop", 330_000),
+			candidates: []youtubeCandidate{{ID: "missingmeta", Channel: "Massive Attack", Duration: 330}},
+			wantReason: ResolutionMetadata,
+		},
+		{
 			name:       "short track duration tolerance",
 			track:      desired.Track{Name: "Intro", Artists: []desired.NamedURI{{Name: "The xx"}}, DurationMS: 60_000},
 			candidates: []youtubeCandidate{{ID: "shorttrack1", Title: "The xx - Intro", Uploader: "The xx", Duration: 70}},
@@ -257,17 +356,18 @@ func TestSelectYouTubeCandidateScoredFixtureCorpus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			report := inspectYouTubeCandidates(tt.track, BuildYouTubeQuery(tt.track), tt.candidates, time.Now())
 			url, err := selectYouTubeCandidate(tt.track, tt.candidates)
 			if tt.wantID != "" {
 				want := "https://www.youtube.com/watch?v=" + tt.wantID
-				if err != nil || url != want {
-					t.Fatalf("selection = %q, %v, want %q", url, err, want)
+				if err != nil || url != want || report.Decision.SelectedURL != want || report.Decision.UnresolvedReason != "" {
+					t.Fatalf("selection = %q, %v; inspection = %#v; want %q", url, err, report.Decision, want)
 				}
 				return
 			}
 			var diagnostic *ResolutionDiagnostic
-			if !errors.As(err, &diagnostic) || diagnostic.Reason != tt.wantReason {
-				t.Fatalf("diagnostic = %#v, error = %v, want reason %q", diagnostic, err, tt.wantReason)
+			if !errors.As(err, &diagnostic) || diagnostic.Reason != tt.wantReason || report.Decision.SelectedURL != "" || report.Decision.UnresolvedReason != tt.wantReason {
+				t.Fatalf("diagnostic = %#v, error = %v, inspection = %#v, want reason %q", diagnostic, err, report.Decision, tt.wantReason)
 			}
 		})
 	}

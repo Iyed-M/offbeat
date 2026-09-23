@@ -50,6 +50,7 @@ type Daemon struct {
 	managedMu          sync.Mutex
 	retriever          acquisition.Retriever
 	resolver           acquisition.Resolver
+	inspector          acquisition.Inspector
 	acquisitionCancel  context.CancelFunc
 	acquisitionWorkers sync.WaitGroup
 	syntheticFixtures  bool
@@ -69,6 +70,8 @@ type Options struct {
 	Retriever acquisition.Retriever
 	// Resolver overrides YouTube selection for controlled acceptance tests.
 	Resolver acquisition.Resolver
+	// Inspector overrides fresh YouTube inspection for controlled acceptance tests.
+	Inspector acquisition.Inspector
 }
 
 var ErrAdapterCredentialUnavailable = errors.New("adapter credential is not provisioned")
@@ -102,6 +105,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		syntheticFixtures: opts.EnableSyntheticFixtures,
 		retriever:         opts.Retriever,
 		resolver:          opts.Resolver,
+		inspector:         opts.Inspector,
 	}
 
 	if err := ensureDirs(cfg); err != nil {
@@ -149,7 +153,14 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		d.retriever = acquisition.NewRetriever(cfg.Downloader)
 	}
 	if d.resolver == nil {
-		d.resolver = acquisition.NewYouTubeResolver(cfg.Downloader)
+		youtube := acquisition.NewYouTubeResolver(cfg.Downloader)
+		d.resolver = youtube
+		if d.inspector == nil {
+			d.inspector = youtube
+		}
+	}
+	if d.inspector == nil {
+		d.inspector = acquisition.NewYouTubeResolver(cfg.Downloader)
 	}
 
 	return d, nil
@@ -446,6 +457,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleSpotifySync(ctx)
 	case "acquire", "acquire.missing", "acquire.status", "acquire.retry", "acquire.retry.unresolved":
 		return d.handleAcquisition(ctx, req)
+	case "acquire.inspect":
+		return d.handleAcquisitionInspection(ctx, req)
 	case "missing":
 		return d.handleMissing(ctx, req.Missing)
 	default:

@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,6 +145,53 @@ func TestCLIAcquireMissingAndAggregateStatus(t *testing.T) {
 	waitCLIAcquisitionState(t, d, 1, "unresolved")
 }
 
+func TestCLIAcquireInspectPrintsMachineReadableFreshReport(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-cli-inspect-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	tools := t.TempDir()
+	_ = writeCLITool(t, tools, "yt-dlp", `printf '%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Artist - inspect","channel":"Artist","duration":1}]}'`)
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var retrieves atomic.Int32
+	d, stop := startCLIAcquisitionDaemon(t, home, cliRetrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		retrieves.Add(1)
+		return nil, errors.New("retriever must not run")
+	}))
+	defer stop()
+	seedCLIAcquisitionTrack(t, d, "inspect")
+	var beforeWorkCount, beforeManagedCount int
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM acquisition_work`).Scan(&beforeWorkCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM managed_tracks`).Scan(&beforeManagedCount); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, err := runCLI(t, home, "acquire", "inspect", "spotify:track:inspect")
+	if err != nil || stderr != "" {
+		t.Fatalf("acquire inspect = stdout %q stderr %q err %v", out, stderr, err)
+	}
+	var report acquisition.ResolutionInspection
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	if !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != "spotify:track:inspect" || report.Query.Text != "Artist - inspect" || len(report.Search.RawResults) != 1 || report.Decision.SelectedURL != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+		t.Fatalf("report = %#v", report)
+	}
+	var afterWorkCount, afterManagedCount int
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM acquisition_work`).Scan(&afterWorkCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM managed_tracks`).Scan(&afterManagedCount); err != nil {
+		t.Fatal(err)
+	}
+	if afterWorkCount != beforeWorkCount || afterManagedCount != beforeManagedCount || retrieves.Load() != 0 {
+		t.Fatalf("inspection side effects: work %d->%d managed %d->%d retrieves=%d", beforeWorkCount, afterWorkCount, beforeManagedCount, afterManagedCount, retrieves.Load())
+	}
+}
+
 func TestCLIAcquireDoesNotRetryUnknownOutcome(t *testing.T) {
 	home := t.TempDir()
 	socketDir := filepath.Join(home, "control")
@@ -200,6 +249,9 @@ func startCLIAcquisitionDaemon(t *testing.T, home string, retriever acquisition.
 	options := app.Options{HomeDir: home, AdapterCredential: "test-credential", Retriever: retriever}
 	if len(resolver) > 0 {
 		options.Resolver = resolver[0]
+		if inspector, ok := resolver[0].(acquisition.Inspector); ok {
+			options.Inspector = inspector
+		}
 	}
 	d, err := app.NewDaemon(context.Background(), options)
 	if err != nil {
@@ -245,4 +297,13 @@ func waitCLIAcquisitionState(t *testing.T, d *app.Daemon, id int64, state string
 	}
 	t.Fatalf("acquisition %d did not become %s", id, state)
 	return db.AcquisitionWork{}
+}
+
+func writeCLITool(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

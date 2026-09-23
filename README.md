@@ -153,6 +153,14 @@ offbeat acquire status
 offbeat acquire retry unresolved
 ```
 
+To inspect a fresh resolver decision without queuing or downloading anything:
+
+```bash
+offbeat acquire inspect spotify:track:TRACK_ID > resolution.json
+```
+
+The daemon searches YouTube metadata anew and writes a versioned JSON report containing the capture time, exact query, ordered raw yt-dlp fields, duplicate-ID treatment, per-candidate rejection or component scores, ranking, thresholds, and final selected URL or unresolved reason. This is not a replay of any earlier unresolved attempt. Inspection accepts any currently desired supported track, including one that already has a Managed track file or Acquisition work, and never changes that state.
+
 `acquire missing` atomically queues each distinct Missing track before returning and reuses the existing acquisition workers. Available tracks, active work, and tracks with a previous YouTube attempt are skipped idempotently. `offbeat acquire retry unresolved` explicitly requeues reusable unresolved YouTube work after resolver improvements; removed, available, active, failed, and completed work is not requeued. `offbeat acquire status` prints aggregate counts and paginates every work outcome over bounded Control responses; add an ID to inspect just one item.
 
 The built-in resolver inspects at most ten yt-dlp YouTube search results. It normalizes punctuation, title words, artist order, and featured-artist presentation, then scores title identity, artist evidence, and duration at 60%, 25%, and 15%. Title and artist fields must independently score at least 60 and 75. Label and Topic uploaders can support a match but cannot prove the primary artist without title evidence. Version markers such as live, remix, remaster, acoustic, instrumental, cover, slowed, or sped-up must agree exactly, and duration must be within the greater of 12 seconds or 5%, capped at 20 seconds. These thresholds are local to the resolver and are fixed by the deterministic safe/wrong/ambiguous fixture corpus rather than copied from spotDL.

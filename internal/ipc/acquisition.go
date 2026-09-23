@@ -14,6 +14,12 @@ type AcquireRequest struct {
 	SourceURL string `json:"source_url"`
 }
 
+// AcquisitionTrackRequest identifies one desired Spotify track for a
+// read-only acquisition-related operation.
+type AcquisitionTrackRequest struct {
+	TrackURI string `json:"track_uri"`
+}
+
 // AcquisitionIDRequest addresses one durable acquisition request.
 type AcquisitionIDRequest struct {
 	ID int64 `json:"acquisition_id"`

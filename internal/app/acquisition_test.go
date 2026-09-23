@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
+	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/desired"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
@@ -30,6 +31,12 @@ func (f retrieveFunc) Retrieve(ctx context.Context, url string) (*acquisition.Me
 type resolveFunc func(context.Context, desired.Track) (string, error)
 
 func (f resolveFunc) Resolve(ctx context.Context, track desired.Track) (string, error) {
+	return f(ctx, track)
+}
+
+type inspectFunc func(context.Context, desired.Track) (acquisition.ResolutionInspection, error)
+
+func (f inspectFunc) Inspect(ctx context.Context, track desired.Track) (acquisition.ResolutionInspection, error) {
 	return f(ctx, track)
 }
 
@@ -152,6 +159,222 @@ func retryUnresolvedControl(t *testing.T, d *Daemon) ipc.UnresolvedRetryBatchRes
 		t.Fatal(err)
 	}
 	return result
+}
+
+func inspectControl(t *testing.T, d *Daemon, uri string) acquisition.ResolutionInspection {
+	t.Helper()
+	raw, err := ipc.Encode(ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: uri}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := sendRaw(t, SocketPath(d.socketDir), append(raw, '\n'))
+	if response.Error != nil {
+		t.Fatalf("acquire inspect: %v", response.Error)
+	}
+	data, _ := json.Marshal(response.Result)
+	var report acquisition.ResolutionInspection
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func TestAcquisitionInspectionIsReadOnlyRegardlessOfManagedOrWorkStatus(t *testing.T) {
+	var retrieves atomic.Int32
+	home, err := os.MkdirTemp("", "offbeat-inspect-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		retrieves.Add(1)
+		return nil, errors.New("retriever must not run")
+	}), 1)
+	tool := writeInspectionTool(t, t.TempDir(), "yt-dlp", `
+case "$*" in
+  *managed*) title=managed ;;
+  *) title=attempted ;;
+esac
+printf '{"entries":[{"id":"aaaaaaaaaaa","title":"Artist - %s","channel":"Artist","duration":1}]}\n' "$title"`)
+	d.inspector = acquisition.NewYouTubeResolver(config.Downloader{YTDLPPath: tool})
+	seedAcquisitionTracks(t, d, "managed", "attempted")
+	media, err := fakeMedia(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := d.managedFiles.Publish("spotify:track:managed", media.File, media.Extension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = media.Close()
+	if err := d.DB.RegisterManagedTrack(context.Background(), "spotify:track:managed", path); err != nil {
+		t.Fatal(err)
+	}
+	work, err := d.DB.EnqueueAcquisition(context.Background(), "spotify:track:attempted", "https://fixture.test/attempted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err = d.DB.ClaimAcquisition(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.FailAcquisition(context.Background(), work.ID, "prior failure"); err != nil {
+		t.Fatal(err)
+	}
+	runAcquisitionDaemon(t, d)
+	before, err := d.DB.Acquisition(context.Background(), work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, beforeMetadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforePlaylists, err := os.ReadDir(filepath.Join(d.Cfg.Paths.MusicRoot, "playlists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeManagedPath string
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT relative_path FROM managed_tracks WHERE track_uri = ?`, "spotify:track:managed").Scan(&beforeManagedPath); err != nil {
+		t.Fatal(err)
+	}
+	var beforeWorkCount, beforeManagedCount int
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM acquisition_work`).Scan(&beforeWorkCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM managed_tracks`).Scan(&beforeManagedCount); err != nil {
+		t.Fatal(err)
+	}
+	for _, uri := range []string{"spotify:track:managed", "spotify:track:attempted"} {
+		if report := inspectControl(t, d, uri); report.Track.URI != uri || !report.FreshSearch {
+			t.Fatalf("inspection for %s = %#v", uri, report)
+		}
+	}
+	after, err := d.DB.Acquisition(context.Background(), work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, afterMetadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterPlaylists, err := os.ReadDir(filepath.Join(d.Cfg.Paths.MusicRoot, "playlists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var afterManagedPath string
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT relative_path FROM managed_tracks WHERE track_uri = ?`, "spotify:track:managed").Scan(&afterManagedPath); err != nil {
+		t.Fatal(err)
+	}
+	var afterWorkCount, afterManagedCount int
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM acquisition_work`).Scan(&afterWorkCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM managed_tracks`).Scan(&afterManagedCount); err != nil {
+		t.Fatal(err)
+	}
+	if after != before || afterWorkCount != beforeWorkCount || afterManagedCount != beforeManagedCount || afterMetadata.Revision != beforeMetadata.Revision || afterManagedPath != beforeManagedPath || len(afterPlaylists) != len(beforePlaylists) || retrieves.Load() != 0 {
+		t.Fatalf("inspection mutated work or retrieved media: before=%#v after=%#v retrieves=%d", before, after, retrieves.Load())
+	}
+}
+
+func TestAcquisitionInspectionSearchDoesNotBlockIndependentAcquisition(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-inspect-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return nil, errors.New("controlled retrieval failure")
+	}), 1)
+	controlDir := t.TempDir()
+	startedFile, releaseFile := filepath.Join(controlDir, "started"), filepath.Join(controlDir, "release")
+	tool := writeInspectionTool(t, controlDir, "yt-dlp", fmt.Sprintf(`
+: > %q
+while [ ! -e %q ]; do sleep 0.01; done
+printf '%%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Artist - inspect","channel":"Artist","duration":1}]}'`, startedFile, releaseFile))
+	d.inspector = acquisition.NewYouTubeResolver(config.Downloader{YTDLPPath: tool})
+	seedAcquisitionTracks(t, d, "inspect", "acquire")
+	runAcquisitionDaemon(t, d)
+	inspectionDone := make(chan acquisition.ResolutionInspection, 1)
+	go func() { inspectionDone <- inspectControl(t, d, "spotify:track:inspect") }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("inspection search did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	acquisitionDone := make(chan ipc.AcquisitionResult, 1)
+	go func() {
+		acquisitionDone <- acquireControl(t, d, ipc.Request{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:acquire", SourceURL: "https://fixture.test/acquire"}})
+	}()
+	select {
+	case work := <-acquisitionDone:
+		if work.TrackURI != "spotify:track:acquire" {
+			t.Fatalf("acquisition = %#v", work)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("independent acquisition was blocked by inspection search")
+	}
+	if err := os.WriteFile(releaseFile, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-inspectionDone:
+	case <-time.After(time.Second):
+		t.Fatal("inspection did not finish")
+	}
+}
+
+func writeInspectionTool(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAcquisitionInspectionReportsUnknownSearchFailureAndOversizedReportAsErrors(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-inspect-errors-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return nil, errors.New("retriever must not run")
+	}), 1)
+	seedAcquisitionTracks(t, d, "known")
+	request := func(uri string) ipc.Request {
+		return ipc.Request{Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: uri}}
+	}
+	if result, err := d.handleAcquisitionInspection(context.Background(), request("spotify:track:absent")); result != nil || err == nil || !strings.Contains(err.Error(), "track is not currently desired") {
+		t.Fatalf("unknown track = %#v, %v", result, err)
+	}
+	d.inspector = inspectFunc(func(context.Context, desired.Track) (acquisition.ResolutionInspection, error) {
+		return acquisition.ResolutionInspection{}, errors.New("controlled search outage")
+	})
+	if result, err := d.handleAcquisitionInspection(context.Background(), request("spotify:track:known")); result != nil || err == nil || !strings.Contains(err.Error(), "YouTube inspection failed") {
+		t.Fatalf("search failure = %#v, %v", result, err)
+	}
+	d.inspector = inspectFunc(func(_ context.Context, track desired.Track) (acquisition.ResolutionInspection, error) {
+		return acquisition.ResolutionInspection{
+			ReportVersion: acquisition.ResolutionInspectionVersion,
+			FreshSearch:   true,
+			CapturedAt:    time.Now().UTC(),
+			Track:         acquisition.InspectionTrack{URI: track.URI},
+			Search: acquisition.InspectionSearch{CandidateLimit: acquisition.MaxYouTubeSearchCandidates, RawResults: []acquisition.YouTubeSearchResult{{
+				ID: "aaaaaaaaaaa", Title: strings.Repeat("x", ipc.MaxMessageBytes),
+			}}},
+		}, nil
+	})
+	if result, err := d.handleAcquisitionInspection(context.Background(), request("spotify:track:known")); result != nil || err == nil || !strings.Contains(err.Error(), "response limit") {
+		t.Fatalf("oversized report = %#v, %v", result, err)
+	}
 }
 
 func fakeMedia(t *testing.T) (*acquisition.Media, error) {

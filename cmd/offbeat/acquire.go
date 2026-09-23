@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 
+	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/app"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
@@ -23,6 +25,48 @@ func runAcquire(configPath, homeDir, trackURI, sourceURL string) int {
 
 func runAcquireMissing(configPath, homeDir string) int {
 	return runAcquisitionSummaryRequest(configPath, homeDir, "acquire missing", ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.missing"})
+}
+
+func runAcquireInspect(configPath, homeDir, trackURI string) int {
+	const label = "acquire inspect"
+	if err := ipc.ValidateAcquisitionTrackURI(trackURI); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: %v\n", label, err)
+		return 2
+	}
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
+		return 1
+	}
+	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: trackURI}}
+	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, youtubeInspectReadTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
+		return 1
+	}
+	if resp.Error != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
+		return 1
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
+		return 1
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return 1
+	}
+	var report acquisition.ResolutionInspection
+	if err := ipc.Decode(raw, &report); err != nil || report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != trackURI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return 1
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: write report: %v\n", label, err)
+		return 1
+	}
+	return 0
 }
 
 func runAcquireStatusAll(configPath, homeDir string) int {
