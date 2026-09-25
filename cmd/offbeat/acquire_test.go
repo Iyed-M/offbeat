@@ -192,6 +192,54 @@ func TestCLIAcquireInspectPrintsMachineReadableFreshReport(t *testing.T) {
 	}
 }
 
+func TestCLIAcquireCaptureAndReplayFrozenResults(t *testing.T) {
+	home := t.TempDir()
+	tools := t.TempDir()
+	_ = writeCLITool(t, tools, "yt-dlp", `printf '%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Artist - capture","channel":"Artist","duration":1}]}'`)
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	d, stop := startCLIAcquisitionDaemon(t, home, cliRetrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		return nil, errors.New("retriever must not run")
+	}))
+	defer stop()
+	seedCLIAcquisitionTrack(t, d, "capture")
+
+	out, stderr, err := runCLI(t, home, "acquire", "capture", "spotify:track:capture")
+	if err != nil || stderr != "" {
+		t.Fatalf("acquire capture = stdout %q stderr %q err %v", out, stderr, err)
+	}
+	var corpus acquisition.EvaluationCorpus
+	if err := json.Unmarshal([]byte(out), &corpus); err != nil {
+		t.Fatalf("capture stdout is not JSON: %v\n%s", err, out)
+	}
+	if corpus.FormatVersion != acquisition.EvaluationFormatVersion || len(corpus.Captures) != 1 || corpus.Captures[0].Observation == nil || corpus.Captures[0].Observation.RecordedDecision.SelectedURL != "https://www.youtube.com/watch?v=aaaaaaaaaaa" || corpus.Captures[0].Provenance.CapturedBy.Version == "" || corpus.Captures[0].Provenance.Producer == nil || corpus.Captures[0].Provenance.Producer.DecisionTool.Version == "" || corpus.Captures[0].Provenance.Producer.SearchTool.Version == "" {
+		t.Fatalf("corpus = %#v", corpus)
+	}
+	corpus.Captures[0].Annotations.Candidates = []acquisition.CandidateAnnotation{{
+		VideoID: "aaaaaaaaaaa", Label: acquisition.CandidateAcceptable,
+		Evidence: "independently verified same recording", Provenance: "authorized manual listening audit",
+	}}
+	corpusPath := filepath.Join(t.TempDir(), "corpus.json")
+	data, err := json.Marshal(corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corpusPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, err = runCLI(t, home, "acquire", "replay", corpusPath)
+	if err != nil || stderr != "" {
+		t.Fatalf("acquire replay = stdout %q stderr %q err %v", out, stderr, err)
+	}
+	var report acquisition.EvaluationReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("replay stdout is not JSON: %v\n%s", err, out)
+	}
+	if report.Total != 1 || report.Counts.CorrectAutomaticSelections != 1 || report.Cases[0].DecisionMatchesRecorded == nil || !*report.Cases[0].DecisionMatchesRecorded || report.Cases[0].Replay == nil || report.Cases[0].Replay.FreshSearch {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
 func TestCLIAcquireDoesNotRetryUnknownOutcome(t *testing.T) {
 	home := t.TempDir()
 	socketDir := filepath.Join(home, "control")
@@ -246,7 +294,7 @@ func startCLIAcquisitionDaemon(t *testing.T, home string, retriever acquisition.
 	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("[spotify_adapter]\nport = %d\n", port)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := app.Options{HomeDir: home, AdapterCredential: "test-credential", Retriever: retriever}
+	options := app.Options{HomeDir: home, Version: "test-daemon", AdapterCredential: "test-credential", Retriever: retriever}
 	if len(resolver) > 0 {
 		options.Resolver = resolver[0]
 		if inspector, ok := resolver[0].(acquisition.Inspector); ok {

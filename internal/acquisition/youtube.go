@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -86,9 +87,11 @@ type Inspector interface {
 // YTDLPResolver uses yt-dlp only as a bounded YouTube search/metadata seam.
 // Media retrieval remains the separate Retriever boundary.
 type YTDLPResolver struct {
-	ytdlp   string
-	command func(context.Context, string, ...string) *exec.Cmd
-	now     func() time.Time
+	ytdlp            string
+	command          func(context.Context, string, ...string) *exec.Cmd
+	now              func() time.Time
+	toolVersionMu    sync.Mutex
+	toolVersionCache string
 }
 
 func NewYouTubeResolver(cfg config.Downloader) *YTDLPResolver {
@@ -171,6 +174,13 @@ type ResolutionInspection struct {
 	Candidates    []CandidateEvidence  `json:"candidates"`
 	Decision      ResolutionDecision   `json:"decision"`
 	Diagnostic    ResolutionDiagnostic `json:"diagnostic"`
+	Producer      *InspectionProducer  `json:"producer,omitempty"`
+}
+
+type InspectionProducer struct {
+	DecisionTool CaptureTool        `json:"decision_tool"`
+	SearchTool   CaptureTool        `json:"search_tool"`
+	Environment  CaptureEnvironment `json:"environment"`
 }
 
 func (r *YTDLPResolver) Resolve(ctx context.Context, track desired.Track) (string, error) {
@@ -204,6 +214,10 @@ func (r *YTDLPResolver) Inspect(ctx context.Context, track desired.Track) (Resol
 	if err != nil {
 		return ResolutionInspection{}, err
 	}
+	toolVersion, err := r.searchToolVersion(ctx, ytdlp)
+	if err != nil {
+		return ResolutionInspection{}, fmt.Errorf("inspect yt-dlp version: %w", err)
+	}
 	args := []string{
 		"--no-config", "--no-plugin-dirs", "--flat-playlist", "--dump-single-json",
 		"--playlist-end", fmt.Sprint(youtubeCandidateLimit), "--no-warnings", "--",
@@ -219,7 +233,27 @@ func (r *YTDLPResolver) Inspect(ctx context.Context, track desired.Track) (Resol
 	if err := json.Unmarshal(output, &result); err != nil {
 		return ResolutionInspection{}, errors.New("decode YouTube search results")
 	}
-	return inspectYouTubeCandidates(track, query, result.Entries, r.currentTime()), nil
+	report := inspectYouTubeCandidates(track, query, result.Entries, r.currentTime())
+	report.Producer = &InspectionProducer{SearchTool: CaptureTool{Name: "yt-dlp", Version: toolVersion}}
+	return report, nil
+}
+
+func (r *YTDLPResolver) searchToolVersion(ctx context.Context, executable string) (string, error) {
+	r.toolVersionMu.Lock()
+	defer r.toolVersionMu.Unlock()
+	if r.toolVersionCache != "" {
+		return r.toolVersionCache, nil
+	}
+	output, err := runProcessOutput(ctx, r.command(ctx, executable, "--version"), 4<<10)
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(string(output))
+	if version == "" || len(version) > 256 || strings.ContainsAny(version, "\r\n") {
+		return "", errors.New("invalid yt-dlp version output")
+	}
+	r.toolVersionCache = version
+	return version, nil
 }
 
 func (r *YTDLPResolver) currentTime() time.Time {

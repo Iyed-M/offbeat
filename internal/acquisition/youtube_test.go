@@ -189,6 +189,23 @@ func TestYTDLPInspectionAndResolveAgreeOnCapturedCandidates(t *testing.T) {
 	}
 }
 
+func TestYTDLPInspectionRecordsSearchToolVersion(t *testing.T) {
+	tools := t.TempDir()
+	body := `if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' '2026.09.25'
+  exit 0
+fi
+printf '%s\n' '{"entries":[{"id":"aaaaaaaaaaa","title":"Massive Attack - Teardrop","channel":"Massive Attack","duration":330}]}'`
+	resolver := NewYouTubeResolver(config.Downloader{YTDLPPath: writeTool(t, tools, "yt-dlp-search", body)})
+	report, err := resolver.Inspect(context.Background(), youtubeTrack("Teardrop", 330_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Producer == nil || report.Producer.SearchTool.Name != "yt-dlp" || report.Producer.SearchTool.Version != "2026.09.25" {
+		t.Fatalf("producer = %#v", report.Producer)
+	}
+}
+
 func TestSelectYouTubeCandidateExplainsMissingCandidates(t *testing.T) {
 	_, err := selectYouTubeCandidate(youtubeTrack("Teardrop", 330_000), nil)
 	var diagnostic *ResolutionDiagnostic

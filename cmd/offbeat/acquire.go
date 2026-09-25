@@ -29,44 +29,107 @@ func runAcquireMissing(configPath, homeDir string) int {
 
 func runAcquireInspect(configPath, homeDir, trackURI string) int {
 	const label = "acquire inspect"
-	if err := ipc.ValidateAcquisitionTrackURI(trackURI); err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: %v\n", label, err)
-		return 2
-	}
-	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
-		return 1
-	}
-	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: trackURI}}
-	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, youtubeInspectReadTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
-		return 1
-	}
-	if resp.Error != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
-		return 1
-	}
-	if resp.Version != ipc.ProtocolVersion {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
-		return 1
-	}
-	raw, err := ipc.Encode(resp.Result)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
-		return 1
-	}
-	var report acquisition.ResolutionInspection
-	if err := ipc.Decode(raw, &report); err != nil || report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != trackURI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
-		return 1
+	report, code := requestAcquisitionInspection(configPath, homeDir, trackURI, label)
+	if code != 0 {
+		return code
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat %s: write report: %v\n", label, err)
 		return 1
 	}
 	return 0
+}
+
+func runAcquireCapture(configPath, homeDir, trackURI string) int {
+	const label = "acquire capture"
+	report, code := requestAcquisitionInspection(configPath, homeDir, trackURI, label)
+	if code != 0 {
+		return code
+	}
+	corpus, err := acquisition.NewEvaluationCorpus(trackURI, version, report)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: could not create capture: %v\n", label, err)
+		return 1
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(corpus); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: write capture: %v\n", label, err)
+		return 1
+	}
+	return 0
+}
+
+func runAcquireReplay(path string) int {
+	const label = "acquire replay"
+	info, err := os.Stat(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: read corpus: %v\n", label, err)
+		return 1
+	}
+	if info.Size() > acquisition.MaxEvaluationCorpusBytes {
+		fmt.Fprintf(os.Stderr, "offbeat %s: corpus exceeds %d bytes\n", label, acquisition.MaxEvaluationCorpusBytes)
+		return 1
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: read corpus: %v\n", label, err)
+		return 1
+	}
+	var corpus acquisition.EvaluationCorpus
+	if err := ipc.Decode(data, &corpus); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: invalid corpus: %v\n", label, err)
+		return 1
+	}
+	report, err := acquisition.ReplayEvaluationCorpus(corpus)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: invalid corpus: %v\n", label, err)
+		return 1
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: write report: %v\n", label, err)
+		return 1
+	}
+	return 0
+}
+
+func requestAcquisitionInspection(configPath, homeDir, trackURI, label string) (acquisition.ResolutionInspection, int) {
+	if err := ipc.ValidateAcquisitionTrackURI(trackURI); err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: %v\n", label, err)
+		return acquisition.ResolutionInspection{}, 2
+	}
+	bootstrap, err := loadBootstrapConfig(configPath, homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: trackURI}}
+	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, youtubeInspectReadTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	if resp.Error != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	var report acquisition.ResolutionInspection
+	if err := ipc.Decode(raw, &report); err != nil || report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != trackURI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates {
+		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		return acquisition.ResolutionInspection{}, 1
+	}
+	return report, 0
 }
 
 func runAcquireStatusAll(configPath, homeDir string) int {

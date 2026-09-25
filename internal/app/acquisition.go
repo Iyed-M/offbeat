@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"runtime"
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
@@ -53,6 +54,11 @@ func (d *Daemon) handleAcquisitionInspection(ctx context.Context, req ipc.Reques
 		}
 		return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection failed: "+err.Error())
 	}
+	if report.Producer == nil {
+		report.Producer = &acquisition.InspectionProducer{}
+	}
+	report.Producer.DecisionTool = acquisition.CaptureTool{Name: "offbeatd", Version: d.version}
+	report.Producer.Environment = acquisition.CaptureEnvironment{OS: runtime.GOOS, Architecture: runtime.GOARCH}
 	encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: report})
 	if err != nil || len(encoded)+1 > ipc.MaxMessageBytes {
 		return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection report exceeds the Control protocol response limit")

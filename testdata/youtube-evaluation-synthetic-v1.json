@@ -1,0 +1,90 @@
+{
+  "format_version": 1,
+  "description": "Synthetic resolver evaluation fixture. Video IDs, metadata, labels, and evidence are invented for deterministic tests and are not claims about real YouTube media.",
+  "captures": [
+    {
+      "capture_id": "synthetic-multiple-acceptable",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}, "producer": {"decision_tool": {"name": "offbeatd", "version": "synthetic"}, "search_tool": {"name": "yt-dlp", "version": "synthetic"}, "environment": {"os": "synthetic", "architecture": "synthetic"}}},
+      "observation": {
+        "captured_at": "2026-09-25T10:00:00Z",
+        "track": {"uri": "spotify:track:synthetic-one", "title": "Song", "artists": [{"uri": "spotify:artist:synthetic", "name": "Artist"}], "album": {"uri": "spotify:album:synthetic", "name": "Album"}, "duration_ms": 200000},
+        "query": {"text": "Artist - Song", "duration_ms": 200000, "version_markers": []},
+        "search": {"candidate_limit": 10, "raw_results": [
+          {"id": "synthgood01", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"},
+          {"id": "synthgood02", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"}
+        ]},
+        "recorded_decision": {"acceptance_floor": 82, "runner_up_margin": 7, "winner_video_id": "synthgood01", "winner_score": 100, "runner_up_video_id": "synthgood02", "runner_up_score": 100, "score_gap": 0, "floor_passed": true, "margin_passed": false, "unresolved_reason": "ambiguous"}
+      },
+      "annotations": {"candidates": [
+        {"video_id": "synthgood01", "label": "acceptable", "evidence": "synthetic same-recording premise", "provenance": "synthetic test fixture"},
+        {"video_id": "synthgood02", "label": "acceptable", "evidence": "synthetic same-recording premise", "provenance": "synthetic test fixture"}
+      ]}
+    },
+    {
+      "capture_id": "synthetic-matching-metadata-distinct-identity",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}, "producer": {"decision_tool": {"name": "offbeatd", "version": "synthetic"}, "search_tool": {"name": "yt-dlp", "version": "synthetic"}, "environment": {"os": "synthetic", "architecture": "synthetic"}}},
+      "observation": {
+        "captured_at": "2026-09-25T10:01:00Z",
+        "track": {"uri": "spotify:track:synthetic-two", "title": "Song", "artists": [{"uri": "spotify:artist:synthetic", "name": "Artist"}], "album": {"uri": "spotify:album:synthetic", "name": "Album"}, "duration_ms": 200000},
+        "query": {"text": "Artist - Song", "duration_ms": 200000, "version_markers": []},
+        "search": {"candidate_limit": 10, "raw_results": [
+          {"id": "samefield01", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"},
+          {"id": "samefield02", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"}
+        ]},
+        "recorded_decision": {"acceptance_floor": 82, "runner_up_margin": 7, "winner_video_id": "samefield01", "winner_score": 100, "runner_up_video_id": "samefield02", "runner_up_score": 100, "score_gap": 0, "floor_passed": true, "margin_passed": false, "unresolved_reason": "ambiguous"}
+      },
+      "annotations": {"candidates": [
+        {"video_id": "samefield01", "label": "acceptable", "evidence": "synthetic same-recording premise", "provenance": "synthetic test fixture"},
+        {"video_id": "samefield02", "label": "incorrect", "evidence": "synthetic different-recording premise despite identical metadata", "provenance": "synthetic test fixture"}
+      ]}
+    },
+    {
+      "capture_id": "synthetic-known-incorrect-selection",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}, "producer": {"decision_tool": {"name": "offbeatd", "version": "synthetic"}, "search_tool": {"name": "yt-dlp", "version": "synthetic"}, "environment": {"os": "synthetic", "architecture": "synthetic"}}},
+      "observation": {
+        "captured_at": "2026-09-25T10:02:00Z",
+        "track": {"uri": "spotify:track:synthetic-three", "title": "Song", "artists": [{"uri": "spotify:artist:synthetic", "name": "Artist"}], "album": {"uri": "spotify:album:synthetic", "name": "Album"}, "duration_ms": 200000},
+        "query": {"text": "Artist - Song", "duration_ms": 200000, "version_markers": []},
+        "search": {"candidate_limit": 10, "raw_results": [{"id": "knownwrong1", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"}]},
+        "recorded_decision": {"acceptance_floor": 82, "runner_up_margin": 7, "winner_video_id": "knownwrong1", "winner_score": 100, "floor_passed": true, "margin_passed": true, "selected_url": "https://www.youtube.com/watch?v=knownwrong1"}
+      },
+      "annotations": {"candidates": [{"video_id": "knownwrong1", "label": "incorrect", "evidence": "synthetic different-recording premise", "provenance": "synthetic test fixture"}]}
+    },
+    {
+      "capture_id": "synthetic-uncertain-selection",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}, "producer": {"decision_tool": {"name": "offbeatd", "version": "synthetic"}, "search_tool": {"name": "yt-dlp", "version": "synthetic"}, "environment": {"os": "synthetic", "architecture": "synthetic"}}},
+      "observation": {
+        "captured_at": "2026-09-25T10:03:00Z",
+        "track": {"uri": "spotify:track:synthetic-four", "title": "Song", "artists": [{"uri": "spotify:artist:synthetic", "name": "Artist"}], "album": {"uri": "spotify:album:synthetic", "name": "Album"}, "duration_ms": 200000},
+        "query": {"text": "Artist - Song", "duration_ms": 200000, "version_markers": []},
+        "search": {"candidate_limit": 10, "raw_results": [{"id": "uncertain01", "title": "Artist - Song", "channel": "Artist", "uploader": "Artist", "duration": 200, "availability": "public", "live_status": "not_live"}]},
+        "recorded_decision": {"acceptance_floor": 82, "runner_up_margin": 7, "winner_video_id": "uncertain01", "winner_score": 100, "floor_passed": true, "margin_passed": true, "selected_url": "https://www.youtube.com/watch?v=uncertain01"}
+      },
+      "annotations": {"candidates": [{"video_id": "uncertain01", "label": "unknown", "evidence": "synthetic identity deliberately left uncertain", "provenance": "synthetic test fixture"}]}
+    },
+    {
+      "capture_id": "synthetic-appropriate-unresolved",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}, "producer": {"decision_tool": {"name": "offbeatd", "version": "synthetic"}, "search_tool": {"name": "yt-dlp", "version": "synthetic"}, "environment": {"os": "synthetic", "architecture": "synthetic"}}},
+      "observation": {
+        "captured_at": "2026-09-25T10:04:00Z",
+        "track": {"uri": "spotify:track:synthetic-five", "title": "Song", "artists": [{"uri": "spotify:artist:synthetic", "name": "Artist"}], "album": {"uri": "spotify:album:synthetic", "name": "Album"}, "duration_ms": 200000},
+        "query": {"text": "Artist - Song", "duration_ms": 200000, "version_markers": []},
+        "search": {"candidate_limit": 10, "raw_results": [{"id": "wrongtitle1", "title": "Other - Different", "channel": "Other", "uploader": "Other", "duration": 200, "availability": "public", "live_status": "not_live"}]},
+        "recorded_decision": {"acceptance_floor": 82, "runner_up_margin": 7, "unresolved_reason": "title_mismatch"}
+      },
+      "annotations": {"candidates": [{"video_id": "wrongtitle1", "label": "incorrect", "evidence": "synthetic different-recording premise", "provenance": "synthetic test fixture"}]}
+    },
+    {
+      "capture_id": "synthetic-search-failure",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}},
+      "failure": {"stage": "search", "message": "synthetic search failure"},
+      "annotations": {"candidates": []}
+    },
+    {
+      "capture_id": "synthetic-retrieval-failure",
+      "provenance": {"captured_by": {"name": "synthetic-test", "version": "1"}},
+      "failure": {"stage": "retrieval", "message": "synthetic retrieval failure"},
+      "annotations": {"candidates": []}
+    }
+  ]
+}
