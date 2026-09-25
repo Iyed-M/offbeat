@@ -365,7 +365,19 @@ func Serve(ctx context.Context, conn net.Conn, h Handler, logger *slog.Logger) e
 		logger.Debug("control request dispatched", "remote", addr, "command", req.Command)
 	}
 
-	result, herr := h(ctx, req)
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear read deadline: %w", err)
+	}
+	handlerCtx, cancelHandler := context.WithCancel(ctx)
+	defer cancelHandler()
+	go func() {
+		var probe [1]byte
+		if _, err := conn.Read(probe[:]); err != nil {
+			cancelHandler()
+		}
+	}()
+	result, herr := h(handlerCtx, req)
+	cancelHandler()
 	if herr != nil {
 		var ipcErr Error
 		if errors.As(herr, &ipcErr) {

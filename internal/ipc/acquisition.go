@@ -32,10 +32,11 @@ type AcquisitionListRequest struct {
 // AcquisitionResult reports the durable acquisition identity and its current
 // state. Source URLs are deliberately not returned through the Control API.
 type AcquisitionResult struct {
-	ID       int64  `json:"acquisition_id"`
-	TrackURI string `json:"track_uri"`
-	State    string `json:"state"`
-	Error    string `json:"error,omitempty"`
+	ID         int64  `json:"acquisition_id"`
+	TrackURI   string `json:"track_uri"`
+	SourceKind string `json:"source_kind"`
+	State      string `json:"state"`
+	Error      string `json:"error,omitempty"`
 }
 
 // AcquisitionBatchResult is bounded regardless of Missing-set size.

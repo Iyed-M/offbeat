@@ -82,17 +82,27 @@ func requestControlWithTimeout(sockPath, command string, readTimeout time.Durati
 }
 
 func requestControlMessage(sockPath string, req ipc.Request, readTimeout time.Duration) (ipc.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), controlConnectTimeout)
+	return requestControlMessageContext(context.Background(), sockPath, req, readTimeout)
+}
+
+func requestControlMessageContext(ctx context.Context, sockPath string, req ipc.Request, readTimeout time.Duration) (ipc.Response, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, controlConnectTimeout)
 	defer cancel()
 
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", sockPath)
+	conn, err := d.DialContext(connectCtx, "unix", sockPath)
 	if err != nil {
 		return ipc.Response{}, fmt.Errorf("connect %s: %w", sockPath, err)
 	}
 	defer conn.Close()
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopOnCancel()
 
-	if err := conn.SetDeadline(time.Now().Add(readTimeout)); err != nil {
+	deadline := time.Now().Add(readTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
 		return ipc.Response{}, fmt.Errorf("set deadline: %w", err)
 	}
 
@@ -110,6 +120,9 @@ func requestControlMessage(sockPath string, req ipc.Request, readTimeout time.Du
 	reader := bufio.NewReader(conn)
 	frame, err := ipc.ReadFrame(reader)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ipc.Response{}, ctx.Err()
+		}
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			return ipc.Response{}, fmt.Errorf("connection closed before response (unknown outcome)")
 		}

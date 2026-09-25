@@ -36,6 +36,28 @@ jq -s '{format_version: 1, description: "user evaluation", captures: map(.captur
 
 Keep an untouched copy of every original capture.
 
+## Sequential batch capture
+
+For a predeclared sample of unresolved YouTube work, the CLI can perform the fresh searches sequentially and produce replay-ready artifacts:
+
+```bash
+offbeat acquire capture-batch --output-dir ./captures --limit 30
+```
+
+The default state is `unresolved`. To audit a predeclared sample of automatic selections instead:
+
+```bash
+offbeat acquire capture-batch --state complete --output-dir ./selection-audit --limit 10
+```
+
+The command pages through current Acquisition status, keeps only YouTube work in the requested state, deduplicates tracks, and confirms each track is still in current Desired Spotify state when it inspects it. Work removed from Desired Spotify state is skipped. It performs at most one fresh search at a time and does not queue, retry, download, or otherwise change Desired Spotify state, Acquisition work, or Managed track files.
+
+The output directory is private (`0700`), and JSON artifacts are private (`0600`). Stable hashed filenames named `capture-*.json` hold independent one-case captures. A resume reuses valid successful captures byte-for-byte; recorded or invalid failures are skipped unless `--retry-failed` is supplied. Put human annotations in the independent capture files. If annotations exist only in a generated combined corpus, a later run refuses to overwrite that corpus so the labels are not silently lost.
+
+`corpus.json`, or numbered `corpus-*.json` chunks when the corpus would exceed the replay size limit, contains the deterministic combination of the selected independent captures. Only files listed in `summary.json` are current batch outputs; unrelated files in the directory are never scanned into the corpus. The summary reports attempted, captured, reused, skipped, search-failure, and retrieval-failure counts, plus diagnostic-reason, eligible-candidate-count, and score-gap distributions. These fields describe observations only and are not correctness labels.
+
+An interrupted run stops the active search before starting another track. Run the same command again to resume. Batch capture is collection machinery, not a sampling method: predeclare the representative sample and independent labeling procedure below before using its output to justify policy changes.
+
 ## Independent annotations
 
 Add one annotation for each candidate whose recording identity you can assess:

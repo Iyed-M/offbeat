@@ -13,7 +13,7 @@ import (
 )
 
 func acquisitionResult(work db.AcquisitionWork) ipc.AcquisitionResult {
-	return ipc.AcquisitionResult{ID: work.ID, TrackURI: work.TrackURI, State: work.State, Error: work.Error}
+	return ipc.AcquisitionResult{ID: work.ID, TrackURI: work.TrackURI, SourceKind: work.SourceKind, State: work.State, Error: work.Error}
 }
 
 const youtubeInspectionTimeout = 2 * time.Minute

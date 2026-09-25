@@ -165,10 +165,13 @@ To save a versioned evaluation artifact and replay it later without a daemon or 
 
 ```bash
 offbeat acquire capture spotify:track:TRACK_ID > track-capture.json
+offbeat acquire capture-batch --output-dir ./captures --limit 30
 offbeat acquire replay corpus.json > outcome-report.json
 ```
 
 Capture performs a fresh search; replay uses only the frozen ordered results and marks the replay as non-fresh. Human recording-identity annotations remain separate from observations, support multiple acceptable uploads, and keep unknown cases out of correct/incorrect counts. See [Evaluating YouTube resolution with frozen observations](docs/youtube-resolution-evaluation.md) for the format, representative sampling and labeling procedure, privacy guidance, outcome definitions, and evidence gates for later policy/provider decisions.
+
+`capture-batch` sequentially captures current unresolved YouTube work by default. It writes private, stable per-track files plus deterministic combined replay corpora and a machine-readable `summary.json`; resuming reuses successful captures without overwriting them. Use `--retry-failed` to repeat only recorded failures, or `--state complete` to audit automatic selections. The command is read-only with respect to Desired Spotify state, Acquisition work, and Managed track files.
 
 `acquire missing` atomically queues each distinct Missing track before returning and reuses the existing acquisition workers. Available tracks, active work, and tracks with a previous YouTube attempt are skipped idempotently. `offbeat acquire retry unresolved` explicitly requeues reusable unresolved YouTube work after resolver improvements; removed, available, active, failed, and completed work is not requeued. `offbeat acquire status` prints aggregate counts and paginates every work outcome over bounded Control responses; add an ID to inspect just one item.
 

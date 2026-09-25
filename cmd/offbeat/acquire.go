@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -105,31 +107,48 @@ func requestAcquisitionInspection(configPath, homeDir, trackURI, label string) (
 		fmt.Fprintf(os.Stderr, "offbeat %s: config: %v\n", label, err)
 		return acquisition.ResolutionInspection{}, 1
 	}
-	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: trackURI}}
-	resp, err := requestControlMessage(app.SocketPath(bootstrap.SocketDir), req, youtubeInspectReadTimeout)
+	report, err := fetchAcquisitionInspection(app.SocketPath(bootstrap.SocketDir), trackURI)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: daemon-unavailable: %v\n", label, err)
-		return acquisition.ResolutionInspection{}, 1
-	}
-	if resp.Error != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: daemon error: %s: %s\n", label, resp.Error.Code, resp.Error.Message)
-		return acquisition.ResolutionInspection{}, 1
-	}
-	if resp.Version != ipc.ProtocolVersion {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply: unsupported protocol version %d\n", label, resp.Version)
-		return acquisition.ResolutionInspection{}, 1
-	}
-	raw, err := ipc.Encode(resp.Result)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
-		return acquisition.ResolutionInspection{}, 1
-	}
-	var report acquisition.ResolutionInspection
-	if err := ipc.Decode(raw, &report); err != nil || report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != trackURI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates {
-		fmt.Fprintf(os.Stderr, "offbeat %s: unexpected daemon reply\n", label)
+		fmt.Fprintf(os.Stderr, "offbeat %s: %v\n", label, err)
 		return acquisition.ResolutionInspection{}, 1
 	}
 	return report, 0
+}
+
+type acquisitionInspectionDaemonError struct {
+	Code    ipc.ErrorCode
+	Message string
+}
+
+func (e *acquisitionInspectionDaemonError) Error() string {
+	return fmt.Sprintf("daemon error: %s: %s", e.Code, e.Message)
+}
+
+func fetchAcquisitionInspection(socket, trackURI string) (acquisition.ResolutionInspection, error) {
+	return fetchAcquisitionInspectionContext(context.Background(), socket, trackURI)
+}
+
+func fetchAcquisitionInspectionContext(ctx context.Context, socket, trackURI string) (acquisition.ResolutionInspection, error) {
+	req := ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.inspect", AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: trackURI}}
+	resp, err := requestControlMessageContext(ctx, socket, req, youtubeInspectReadTimeout)
+	if err != nil {
+		return acquisition.ResolutionInspection{}, fmt.Errorf("daemon-unavailable: %w", err)
+	}
+	if resp.Error != nil {
+		return acquisition.ResolutionInspection{}, &acquisitionInspectionDaemonError{Code: resp.Error.Code, Message: resp.Error.Message}
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		return acquisition.ResolutionInspection{}, fmt.Errorf("unexpected daemon reply: unsupported protocol version %d", resp.Version)
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		return acquisition.ResolutionInspection{}, errors.New("unexpected daemon reply")
+	}
+	var report acquisition.ResolutionInspection
+	if err := ipc.Decode(raw, &report); err != nil || report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.CapturedAt.IsZero() || report.Track.URI != trackURI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates {
+		return acquisition.ResolutionInspection{}, errors.New("unexpected daemon reply")
+	}
+	return report, nil
 }
 
 func runAcquireStatusAll(configPath, homeDir string) int {
@@ -169,7 +188,7 @@ func runAcquireStatusAll(configPath, homeDir string) int {
 			first = false
 		}
 		for _, work := range result.Work {
-			if work.ID <= 0 || ipc.ValidateAcquisitionTrackURI(work.TrackURI) != nil || !validAcquisitionState(work.State) {
+			if work.ID <= 0 || ipc.ValidateAcquisitionTrackURI(work.TrackURI) != nil || !validAcquisitionSourceKind(work.SourceKind) || !validAcquisitionState(work.State) {
 				fmt.Fprintln(os.Stderr, "offbeat acquire status: unexpected daemon reply")
 				return 1
 			}
@@ -317,10 +336,14 @@ func decodeAcquisitionResult(result any) (ipc.AcquisitionResult, error) {
 	if err := ipc.Decode(raw, &decoded); err != nil {
 		return ipc.AcquisitionResult{}, err
 	}
-	if decoded.ID <= 0 || ipc.ValidateAcquisitionTrackURI(decoded.TrackURI) != nil || !validAcquisitionState(decoded.State) {
+	if decoded.ID <= 0 || ipc.ValidateAcquisitionTrackURI(decoded.TrackURI) != nil || !validAcquisitionSourceKind(decoded.SourceKind) || !validAcquisitionState(decoded.State) {
 		return ipc.AcquisitionResult{}, fmt.Errorf("invalid acquisition result")
 	}
 	return decoded, nil
+}
+
+func validAcquisitionSourceKind(kind string) bool {
+	return kind == "direct" || kind == "youtube"
 }
 
 func validAcquisitionState(state string) bool {
