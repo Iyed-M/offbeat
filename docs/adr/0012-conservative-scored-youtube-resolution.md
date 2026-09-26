@@ -1,6 +1,6 @@
 # ADR 0012: Use conservative scored YouTube resolution
 
-- Status: Accepted
+- Status: Accepted; runner-up margin amended for opt-in auto_best by ADR-0013
 - Date: 2026-09-20
 
 ## Context

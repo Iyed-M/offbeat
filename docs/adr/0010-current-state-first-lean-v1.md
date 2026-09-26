@@ -1,6 +1,6 @@
 # ADR 0010: Prefer a current-state-first lean v1
 
-- Status: Accepted; acquisition decisions amended by ADR-0011
+- Status: Accepted; acquisition decisions amended by ADR-0011 and scoped manual review amended by ADR-0013
 - Date: 2026-09-17
 
 ## Context

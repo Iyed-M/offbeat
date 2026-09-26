@@ -1,6 +1,6 @@
 # ADR 0011: Make YouTube resolution a concrete v1 acquisition workflow
 
-- Status: Accepted
+- Status: Accepted; scoped manual choices and local review amended by ADR-0013
 - Date: 2026-09-18
 
 Explicit per-track source URLs proved the `yt-dlp` retrieval boundary, but they do not achieve Offbeat's intended desktop workflow. After `offbeat spotify sync`, an explicit `offbeat acquire missing` command will take the current Missing track set, use a single built-in YouTube resolver to select one eligible media URL for each track from Spotify title, artist, duration, and version metadata, and submit each selection to the existing restart-safe Acquisition work path. Resolution must be deterministic and conservative: an ambiguous or ineligible result remains unresolved, while other tracks continue. Direct URL acquisition remains available as the user-controlled override.
