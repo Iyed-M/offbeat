@@ -23,7 +23,7 @@ func TestReviewReadOnlyAndEscaped(t *testing.T) {
 		case "review.list":
 			return ipc.Response{Version: 1, Result: ipc.ReviewPage{Tracks: []ipc.ReviewTrack{{TrackURI: uri, Title: `<img src=x onerror=alert(1)>`, Artists: []string{`<script>alert(2)</script>`}, DurationMS: 123000, WorkState: "unresolved"}}}}, nil
 		case "acquire.inspect":
-			return ipc.Response{Version: 1, Result: acquisition.ResolutionInspection{ReportVersion: 1, FreshSearch: true, CapturedAt: time.Now(), Track: acquisition.InspectionTrack{URI: uri, Title: `<svg onload=alert(3)>`, Artists: []acquisition.InspectionNamedURI{{Name: `<b>evil</b>`, URI: "spotify:artist:abc"}}, DurationMS: 123000}, Search: acquisition.InspectionSearch{RawResults: []acquisition.YouTubeSearchResult{{ID: "abcdefghijk", Title: `<script>alert(4)</script>`, Uploader: `" onmouseover="evil`, Duration: 123}, {ID: "https://bad", Title: "Rejected"}}}, Candidates: []acquisition.CandidateEvidence{{FirstSearchPosition: 1, VideoID: "abcdefghijk", Eligible: true, Score: intReview(92)}, {FirstSearchPosition: 2, RejectionReason: acquisition.ResolutionMetadata}}}}, nil
+			return ipc.Response{Version: 1, Result: acquisition.ResolutionInspection{ReportVersion: 1, FreshSearch: true, CapturedAt: time.Now(), Track: acquisition.InspectionTrack{URI: uri, Title: `<svg onload=alert(3)>`, Artists: []acquisition.InspectionNamedURI{{Name: `<b>evil</b>`, URI: "spotify:artist:abc"}}, DurationMS: 123000}, Search: acquisition.InspectionSearch{RawResults: []acquisition.YouTubeSearchResult{{ID: "abcdefghijk", Title: `<script>alert(4)</script>`, Uploader: `" onmouseover="evil`, Channel: `other <channel>`, Duration: 123}, {ID: "https://bad", Title: "Rejected"}}}, Candidates: []acquisition.CandidateEvidence{{FirstSearchPosition: 1, VideoID: "abcdefghijk", Eligible: true, Score: intReview(92)}, {FirstSearchPosition: 2, RejectionReason: acquisition.ResolutionMetadata}}}}, nil
 		}
 		t.Fatalf("mutating command: %s", req.Command)
 		return ipc.Response{}, nil
@@ -42,11 +42,11 @@ func TestReviewReadOnlyAndEscaped(t *testing.T) {
 		t.Fatalf("list: %d %s", list.Code, list.Body.String())
 	}
 	track := get(base + "track?uri=" + url.QueryEscape(uri))
-	if track.Code != 200 || !strings.Contains(track.Body.String(), "Loading fresh candidates") || !strings.Contains(track.Body.String(), "fetch(") {
+	if track.Code != 200 || !strings.Contains(track.Body.String(), "Loading fresh candidates") || !strings.Contains(track.Body.String(), "base+'status?'") || !strings.Contains(track.Body.String(), "Refresh acquisition status") {
 		t.Fatalf("track: %s", track.Body.String())
 	}
 	inspect := get(base + "inspect?uri=" + url.QueryEscape(uri))
-	if inspect.Code != 200 || strings.Contains(inspect.Body.String(), `<script>alert`) || strings.Contains(inspect.Body.String(), `<svg`) || !strings.Contains(inspect.Body.String(), "score 92") || !strings.Contains(inspect.Body.String(), "metadata_mismatch") || !strings.Contains(inspect.Body.String(), "https://www.youtube.com/watch?v=abcdefghijk") || strings.Contains(inspect.Body.String(), "https://bad") || !strings.Contains(inspect.Body.String(), `data-choice=`) || !strings.Contains(inspect.Body.String(), `expected_artist_uris`) || strings.Contains(inspect.Body.String(), `onmouseover="evil`) {
+	if inspect.Code != 200 || strings.Contains(inspect.Body.String(), `<script>alert`) || strings.Contains(inspect.Body.String(), `<svg`) || !strings.Contains(inspect.Body.String(), "score 92") || !strings.Contains(inspect.Body.String(), "metadata_mismatch") || !strings.Contains(inspect.Body.String(), "https://www.youtube.com/watch?v=abcdefghijk") || strings.Contains(inspect.Body.String(), "https://bad") || !strings.Contains(inspect.Body.String(), `data-choice=`) || !strings.Contains(inspect.Body.String(), `expected_artist_uris`) || strings.Contains(inspect.Body.String(), `onmouseover="evil`) || !strings.Contains(inspect.Body.String(), "Uploader: &#34; onmouseover=&#34;evil · Channel: other &lt;channel&gt;") {
 		t.Fatalf("inspection: %d %s", inspect.Code, inspect.Body.String())
 	}
 	get(base + "track?uri=" + url.QueryEscape(uri)) // refresh
@@ -166,6 +166,103 @@ func TestReviewSelectionAndMappingMutations(t *testing.T) {
 }
 
 func intReview(n int) *int { return &n }
+
+func TestReviewStatusIsScopedReadOnlyAndReportsOutcome(t *testing.T) {
+	const host = "127.0.0.1:9876"
+	const uri = "spotify:track:abc"
+	token := strings.Repeat("e", 64)
+	base := "http://" + host + "/s/" + token + "/"
+	states := []ipc.AcquisitionResult{
+		{ID: 42, TrackURI: uri, SourceKind: "youtube", State: "running"},
+		{ID: 42, TrackURI: uri, SourceKind: "youtube", State: "failed", Error: "video unavailable"},
+		{ID: 42, TrackURI: uri, SourceKind: "youtube", State: "complete"},
+	}
+	var calls int
+	fake := func(_ context.Context, req ipc.Request, _ time.Duration) (ipc.Response, error) {
+		if req.Command != "acquire.status" || req.AcquisitionStatus == nil || req.AcquisitionStatus.ID != 42 {
+			t.Fatalf("unexpected Control request: %+v", req)
+		}
+		calls++
+		return ipc.Response{Version: ipc.ProtocolVersion, Result: states[calls-1]}, nil
+	}
+	h := newReviewHandler(host, token, fake)
+	request := func(path, method, requestHost, origin, fetchSite string) *httptest.ResponseRecorder {
+		t.Helper()
+		address := base + path
+		if strings.HasPrefix(path, "/") {
+			address = "http://" + host + path
+		}
+		r := httptest.NewRequest(method, address, nil)
+		r.Host = requestHost
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if fetchSite != "" {
+			r.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	path := "status?id=42&uri=" + url.QueryEscape(uri)
+	for _, tc := range []struct {
+		path, method, host, origin, site string
+		code                             int
+	}{
+		{path, "GET", "evil.test", "", "", 403},
+		{path, "GET", host, "http://evil.test", "", 403},
+		{path, "GET", host, "", "cross-site", 403},
+		{"/s/" + strings.Repeat("f", 64) + "/" + path, "GET", host, "", "", 404},
+		{"status?id=0&uri=" + url.QueryEscape(uri), "GET", host, "", "", 400},
+		{"status?id=42&uri=bad", "GET", host, "", "", 400},
+		{"status?id=42&uri=" + url.QueryEscape(uri) + "&extra=1", "GET", host, "", "", 400},
+		{path, "POST", host, "", "", 405},
+	} {
+		w := request(tc.path, tc.method, tc.host, tc.origin, tc.site)
+		if w.Code != tc.code {
+			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Body.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("unauthorized status reached daemon: %d", calls)
+	}
+	for _, state := range states {
+		w := request(path, "GET", host, "", "")
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"`+state.State+`"`) || (state.Error != "" && !strings.Contains(w.Body.String(), state.Error)) {
+			t.Fatalf("status: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("status calls: %d", calls)
+	}
+}
+
+func TestReviewStatusRejectsMismatchedDaemonWorkAndErrors(t *testing.T) {
+	const host = "127.0.0.1:9876"
+	token := strings.Repeat("f", 64)
+	base := "http://" + host + "/s/" + token + "/status?id=42&uri=spotify:track:abc"
+	var result ipc.Response
+	h := newReviewHandler(host, token, func(_ context.Context, req ipc.Request, _ time.Duration) (ipc.Response, error) { return result, nil })
+	for _, work := range []ipc.AcquisitionResult{
+		{ID: 43, TrackURI: "spotify:track:abc", SourceKind: "youtube", State: "complete"},
+		{ID: 42, TrackURI: "spotify:track:other", SourceKind: "youtube", State: "failed"},
+		{ID: 42, TrackURI: "spotify:track:abc", SourceKind: "http", State: "complete"},
+		{ID: 42, TrackURI: "spotify:track:abc", SourceKind: "youtube", State: "unknown"},
+	} {
+		result = ipc.Response{Version: ipc.ProtocolVersion, Result: work}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", base, nil))
+		if w.Code != 502 || !strings.Contains(w.Body.String(), "invalid daemon response") {
+			t.Fatalf("mismatched work %+v: %d %s", work, w.Code, w.Body.String())
+		}
+	}
+	result = ipc.Response{Version: ipc.ProtocolVersion, Error: &ipc.Error{Code: ipc.CodeInternal, Message: "worker unavailable"}}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", base, nil))
+	if w.Code != 502 || !strings.Contains(w.Body.String(), "worker unavailable") {
+		t.Fatalf("daemon error: %d %s", w.Code, w.Body.String())
+	}
+}
 
 func TestReviewSecurityBoundsAndErrors(t *testing.T) {
 	const host = "127.0.0.1:9876"

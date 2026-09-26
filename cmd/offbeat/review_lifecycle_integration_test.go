@@ -203,6 +203,11 @@ func TestReviewLifecycleAcrossCLIHTTPAndRestart(t *testing.T) {
 	wg.Wait()
 	close(releaseChoice)
 	waitCLIAcquisitionState(t, d, 1, db.AcquisitionFailed)
+	status := get("status?id=1&uri=" + url.QueryEscape(uri))
+	var selectedWork ipc.AcquisitionResult
+	if err := json.Unmarshal(status.Body.Bytes(), &selectedWork); err != nil || selectedWork.ID != 1 || selectedWork.TrackURI != uri || selectedWork.State != "failed" || !strings.Contains(selectedWork.Error, "fixture video unavailable") {
+		t.Fatalf("selected work outcome: %+v (%v)", selectedWork, err)
+	}
 	if attempts.Load() != 2 {
 		t.Fatalf("expected exactly two retrievals, got %d", attempts.Load())
 	}

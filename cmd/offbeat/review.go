@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,7 +74,7 @@ func reviewRequest(ctx context.Context, control reviewControl, req ipc.Request, 
 	resp, err := control(ctx, req, timeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, errors.New("search canceled")
+			return nil, errors.New("request canceled")
 		}
 		return nil, fmt.Errorf("daemon unavailable: %w", err)
 	}
@@ -111,9 +112,9 @@ type reviewView struct {
 }
 
 type reviewVideo struct {
-	Title, Channel, Duration, Score, Reason, Eligibility string
-	Link                                                 template.URL
-	Choice                                               string
+	Title, Uploader, Channel, Duration, Score, Reason, Eligibility string
+	Link                                                           template.URL
+	Choice                                                         string
 }
 
 func reviewURL(base, route string, values url.Values) template.URL {
@@ -158,12 +159,16 @@ func newReviewHandler(host, token string, control reviewControl) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if route != "" && route != "track" && route != "inspect" && route != "mappings" && route != "mapping" {
+		if route != "" && route != "track" && route != "inspect" && route != "mappings" && route != "mapping" && route != "status" {
 			http.NotFound(w, r)
 			return
 		}
 		if len(r.URL.RawQuery) > 512 {
 			http.Error(w, "invalid query", http.StatusBadRequest)
+			return
+		}
+		if route == "status" {
+			handleReviewStatus(w, r, control)
 			return
 		}
 		view := reviewView{Base: template.URL(base), Nonce: token}
@@ -284,9 +289,9 @@ func newReviewHandler(host, token string, control reviewControl) http.Handler {
 						view.Status = "Search completed"
 					}
 					for position, raw := range report.Search.RawResults {
-						video := reviewVideo{Title: raw.Title, Channel: raw.Channel, Duration: formatReviewDuration(int(raw.Duration * 1000)), Score: "—", Eligibility: "Rejected", Reason: "metadata unavailable"}
-						if video.Channel == "" {
-							video.Channel = raw.Uploader
+						video := reviewVideo{Title: raw.Title, Uploader: raw.Uploader, Channel: raw.Channel, Duration: formatReviewDuration(int(raw.Duration * 1000)), Score: "—", Eligibility: "Rejected", Reason: "metadata unavailable"}
+						if video.Uploader == video.Channel {
+							video.Channel = ""
 						}
 						for _, candidate := range report.Candidates {
 							if candidate.FirstSearchPosition == position+1 || containsReviewPosition(candidate.DuplicateSearchPositions, position+1) {
@@ -327,6 +332,36 @@ func newReviewHandler(host, token string, control reviewControl) http.Handler {
 	})
 }
 
+// Status is a read-only lookup for one selected work item, never a retry.
+func handleReviewStatus(w http.ResponseWriter, r *http.Request, control reviewControl) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	query := r.URL.Query()
+	if len(query) != 2 || len(query["id"]) != 1 || len(query["uri"]) != 1 || ipc.ValidateManualMappingTrackURI(query.Get("uri")) != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid status request"}`)
+		return
+	}
+	id, err := strconv.ParseInt(query.Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid status request"}`)
+		return
+	}
+	result, err := reviewRequest(r.Context(), control, ipc.Request{Version: ipc.ProtocolVersion, Command: "acquire.status", AcquisitionStatus: &ipc.AcquisitionIDRequest{ID: id}}, controlReadTimeout)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	var work ipc.AcquisitionResult
+	if decodeReviewResult(result, &work) != nil || work.ID != id || work.TrackURI != query.Get("uri") || work.SourceKind != "youtube" || !validAcquisitionState(work.State) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"invalid daemon response for selected work"}`)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(work)
+}
+
 func handleReviewMutation(w http.ResponseWriter, r *http.Request, route string, control reviewControl) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
@@ -363,7 +398,7 @@ func handleReviewMutation(w http.ResponseWriter, r *http.Request, route string, 
 	switch route {
 	case "select":
 		var work ipc.AcquisitionResult
-		if decodeReviewResult(result, &work) != nil || work.TrackURI != req.AcquisitionChoice.TrackURI || work.SourceKind != "youtube" {
+		if decodeReviewResult(result, &work) != nil || work.ID <= 0 || work.TrackURI != req.AcquisitionChoice.TrackURI || work.SourceKind != "youtube" || !validAcquisitionState(work.State) {
 			http.Error(w, `{"error":"invalid daemon response"}`, http.StatusBadGateway)
 			return
 		}
@@ -409,7 +444,45 @@ var reviewListTemplate = template.Must(template.New("list").Funcs(template.FuncM
 	return reviewURL(string(base), "track", url.Values{"uri": {uri}})
 }}).Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Offbeat review</title><style>` + reviewCSS + `</style><main><h1>Review unresolved tracks</h1><p>Currently desired, missing YouTube work. Reviewing does not start acquisition.</p><p><a href="{{.Base}}mappings">Saved mappings</a></p>{{if .Error}}<p role="alert">Could not load review list: {{.Error}}</p><a href="{{.Base}}">Try again</a>{{else}}{{if not .Tracks}}<p>No unresolved tracks on this page.</p>{{end}}<ul>{{range .Tracks}}<li><a href="{{trackURL $.Base .TrackURI}}">{{.Title}}</a><span>{{join .Artists}} · {{duration .DurationMS}} · {{.WorkState}}</span>{{if .WorkError}}<small>Earlier work: {{.WorkError}}</small>{{end}}</li>{{end}}</ul>{{if .Next}}<a href="{{.Next}}">Next page →</a>{{end}}{{end}}</main></html>`))
 
-var reviewTrackTemplate = template.Must(template.New("track").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspect track · Offbeat</title><style>` + reviewCSS + `</style><main><a href="{{.Base}}">← Review list</a><h1>Fresh YouTube inspection</h1><p>These are new search observations, not the results of the earlier unresolved attempt. Opening and refreshing do not change work or mappings.</p><p><a href="{{.Base}}track?uri={{urlquery .URI}}">Refresh candidates</a> · <a href="{{.Base}}">Skip for now</a></p><section id="results" role="status">Loading fresh candidates…</section><p id="selection-status" role="status"></p><script nonce="{{.Nonce}}">const base={{.Base}},token={{.Nonce}};fetch({{.Inspect}}, {credentials:'same-origin'}).then(r=>r.text().then(text=>({ok:r.ok,text}))).then(({ok,text})=>{document.getElementById('results').innerHTML=text;if(!ok)document.getElementById('results').setAttribute('role','alert')}).catch(()=>{document.getElementById('results').textContent='Search canceled or connection lost. Refresh to try again.'});document.getElementById('results').addEventListener('click',async e=>{if(!e.target.matches('button[data-choice]'))return;const button=e.target,choice=JSON.parse(button.dataset.choice),status=document.getElementById('selection-status');if(!confirm('Choose exactly video '+choice.video_id+' for this Spotify track?'))return;if(choice.rejection_reason){if(!confirm('Rejected: '+choice.rejection_reason+'. Choose video '+choice.video_id+' anyway?'))return;choice.acknowledge_rejection=choice.rejection_reason}button.disabled=true;status.textContent='Confirming selection…';try{const response=await fetch(base+'select',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Offbeat-Token':token},body:JSON.stringify(choice)}),data=await response.json();if(!response.ok)throw Error(data.error||'Selection failed');status.textContent='Acquisition '+data.state+' (work '+data.acquisition_id+'). Review list will reflect the updated status.';const link=document.createElement('a');link.href=base;link.textContent='Refresh review list';status.append(' ',link)}catch(err){status.textContent='Selection failed or stale: '+err.message+'. Refresh candidates and try again.'}finally{button.disabled=false}})</script></main></html>`))
+var reviewTrackTemplate = template.Must(template.New("track").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspect track · Offbeat</title><style>` + reviewCSS + `</style><main><a href="{{.Base}}">← Review list</a><h1>Fresh YouTube inspection</h1><p>These are new search observations, not the results of the earlier unresolved attempt. Opening and refreshing do not change work or mappings.</p><p><a href="{{.Base}}track?uri={{urlquery .URI}}">Refresh candidates</a> · <a href="{{.Base}}">Skip for now</a></p><section id="results" role="status">Loading fresh candidates…</section><p id="selection-status" role="status"></p><button id="status-refresh" type="button" hidden>Refresh acquisition status</button><script nonce="{{.Nonce}}">
+const base={{.Base}},token={{.Nonce}},uri={{.URI}};
+const results=document.getElementById('results'),status=document.getElementById('selection-status'),refresh=document.getElementById('status-refresh');
+let selectedID=null, generation=0;
+fetch({{.Inspect}}, {credentials:'same-origin'}).then(r=>r.text().then(text=>({ok:r.ok,text}))).then(({ok,text})=>{results.innerHTML=text;if(!ok)results.setAttribute('role','alert')}).catch(()=>{results.textContent='Search canceled or connection lost. Refresh to try again.'});
+function displayWork(work){
+  status.textContent='Acquisition '+work.state+' (work '+work.acquisition_id+')'+(work.error?': '+work.error:'')+'.';
+  return work.state==='complete'||work.state==='failed'||work.state==='unresolved';
+}
+async function checkStatus(id, run, remaining){
+  if(run!==generation)return;
+  try{
+    const response=await fetch(base+'status?'+new URLSearchParams({id:String(id),uri}),{credentials:'same-origin'});
+    const data=await response.json();
+    if(!response.ok)throw Error(data.error||'Status unavailable');
+    if(run!==generation)return;
+    if(data.acquisition_id!==id||data.track_uri!==uri)throw Error('Status did not match selected work');
+    if(displayWork(data))return;
+    if(remaining>0){setTimeout(()=>checkStatus(id,run,remaining-1),2000)}
+    else status.append(' Automatic checks paused; use Refresh acquisition status.');
+  }catch(err){if(run===generation)status.textContent='Could not check acquisition '+id+': '+err.message+'. Use Refresh acquisition status to try again.'}
+}
+refresh.onclick=()=>{if(selectedID!==null)checkStatus(selectedID,++generation,0)};
+results.addEventListener('click',async e=>{
+  if(!e.target.matches('button[data-choice]'))return;
+  const button=e.target,choice=JSON.parse(button.dataset.choice);
+  if(!confirm('Choose exactly video '+choice.video_id+' for this Spotify track?'))return;
+  if(choice.rejection_reason){if(!confirm('Rejected: '+choice.rejection_reason+'. Choose video '+choice.video_id+' anyway?'))return;choice.acknowledge_rejection=choice.rejection_reason}
+  button.disabled=true;status.textContent='Confirming selection…';
+  try{
+    const response=await fetch(base+'select',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Offbeat-Token':token},body:JSON.stringify(choice)}),data=await response.json();
+    if(!response.ok)throw Error(data.error||'Selection failed');
+    selectedID=data.acquisition_id;refresh.hidden=false;
+    const run=++generation;
+    if(!displayWork(data))setTimeout(()=>checkStatus(selectedID,run,30),2000);
+  }catch(err){status.textContent='Selection failed or stale: '+err.message+'. Refresh candidates and try again.'}
+  finally{button.disabled=false}
+});
+</script></main></html>`))
 
 var reviewInspectionTemplate = template.Must(template.New("inspection").Funcs(template.FuncMap{"duration": formatReviewDuration, "joinArtists": func(a []acquisition.InspectionNamedURI) string {
 	names := make([]string, 0, len(a))
@@ -417,7 +490,7 @@ var reviewInspectionTemplate = template.Must(template.New("inspection").Funcs(te
 		names = append(names, item.Name)
 	}
 	return strings.Join(names, ", ")
-}}).Parse(`<section>{{if .Error}}<p role="alert">Inspection failed or was canceled: {{.Error}}</p>{{else}}<h2>{{.Track.Title}}</h2><p>{{joinArtists .Track.Artists}} · {{duration .Track.DurationMS}}</p><p>Fresh search at {{.Captured}} · {{.Status}}. Metadata scores do not verify audio identity.</p>{{if not .Results}}<p>No YouTube results found. Refresh to search again.</p>{{end}}<ol>{{range .Results}}<li><strong>{{.Title}}</strong><span>{{.Channel}} · {{.Duration}} · {{.Eligibility}} · score {{.Score}} · {{.Reason}}</span>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open on YouTube ↗</a>{{else}}<small>No valid external video link</small>{{end}}{{if .Choice}} <button type="button" data-choice="{{.Choice}}">Choose this video</button>{{end}}</li>{{end}}</ol>{{end}}</section>`))
+}}).Parse(`<section>{{if .Error}}<p role="alert">Inspection failed or was canceled: {{.Error}}</p>{{else}}<h2>{{.Track.Title}}</h2><p>{{joinArtists .Track.Artists}} · {{duration .Track.DurationMS}}</p><p>Fresh search at {{.Captured}} · {{.Status}}. Metadata scores do not verify audio identity.</p>{{if not .Results}}<p>No YouTube results found. Refresh to search again.</p>{{end}}<ol>{{range .Results}}<li><strong>{{.Title}}</strong><span>{{if .Uploader}}Uploader: {{.Uploader}}{{end}}{{if .Channel}}{{if .Uploader}} · {{end}}Channel: {{.Channel}}{{end}} · {{.Duration}} · {{.Eligibility}} · score {{.Score}} · {{.Reason}}</span>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open on YouTube ↗</a>{{else}}<small>No valid external video link</small>{{end}}{{if .Choice}} <button type="button" data-choice="{{.Choice}}">Choose this video</button>{{end}}</li>{{end}}</ol>{{end}}</section>`))
 
 var reviewMappingsTemplate = template.Must(template.New("mappings").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Saved mappings · Offbeat</title><style>` + reviewCSS + `</style><main><a href="{{.Base}}">← Review list</a><h1>Saved mappings</h1>{{if .Error}}<p role="alert">{{.Error}}</p>{{else}}{{if not .Mappings}}<p>No mappings on this page.</p>{{end}}<ul>{{range .Mappings}}<li><a href="{{$.Base}}mapping?uri={{urlquery .TrackURI}}">{{.TrackURI}}</a><span>{{.VideoID}} · {{.WorkState}} {{.WorkError}}</span></li>{{end}}</ul>{{if .Next}}<a href="{{.Next}}">Next page →</a>{{end}}{{end}}</main></html>`))
 
