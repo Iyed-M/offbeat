@@ -175,11 +175,22 @@ Capture performs a fresh search; replay uses only the frozen ordered results and
 
 `acquire missing` atomically queues each distinct Missing track before returning and reuses the existing acquisition workers. Available tracks, active work, and tracks with a previous YouTube attempt are skipped idempotently. `offbeat acquire retry unresolved` explicitly requeues reusable unresolved YouTube work after resolver improvements; removed, available, active, failed, and completed work is not requeued. `offbeat acquire status` prints aggregate counts and paginates every work outcome over bounded Control responses; add an ID to inspect just one item.
 
+Save an explicit YouTube choice for later eligible Missing-track work:
+
+```bash
+offbeat acquire mapping set spotify:track:TRACK_ID VIDEO_ID
+offbeat acquire mapping show spotify:track:TRACK_ID
+offbeat acquire mapping list
+offbeat acquire mapping remove spotify:track:TRACK_ID
+```
+
+`VIDEO_ID` must be exactly 11 YouTube ID characters (`A–Z`, `a–z`, `0–9`, `_`, `-`); pass an ID, not a URL. `list` reads bounded pages from the daemon. Choices are retained across restart and Spotify sync, including when a track is removed; setting or removing one does not start retrieval or change an existing Managed file. On **new** YouTube work for a currently desired Missing track, the saved ID wins over the resolver and is used as `https://www.youtube.com/watch?v=VIDEO_ID`. Already active work keeps its selected source. A failed chosen video stays mapped and its failure appears in `mapping show`/`list` and `acquire status`. For unresolved work, explicitly run `offbeat acquire retry unresolved` after setting a mapping. For a failed YouTube retrieval, replace the ID if needed and use `offbeat acquire retry ID`; this makes a new source selection attempt. Removing the mapping makes a later explicit retry use the resolver again. Direct-URL work retains its original source on retry.
+
 The built-in resolver inspects at most ten yt-dlp YouTube search results. It normalizes punctuation, title words, artist order, and featured-artist presentation, then scores title identity, artist evidence, and duration at 60%, 25%, and 15%. Title and artist fields must independently score at least 60 and 75. Label and Topic uploaders can support a match but cannot prove the primary artist without title evidence. Version markers such as live, remix, remaster, acoustic, instrumental, cover, slowed, or sped-up must agree exactly, and duration must be within the greater of 12 seconds or 5%, capped at 20 seconds. These thresholds are local to the resolver and are fixed by the deterministic safe/wrong/ambiguous fixture corpus rather than copied from spotDL.
 
 A best candidate must score at least 82 and lead the runner-up by at least seven points. No result, field/version/duration rejection, a weak winner, or a close runner-up becomes `unresolved`; status stores only its bounded category and aggregate rejection counts, never candidate metadata or source URLs. Another track's work continues independently. The selected canonical YouTube URL is persisted before retrieval, so restart does not repeat a successful resolution. Direct URL acquisition remains the user-controlled override for an unresolved track.
 
-The direct submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `unresolved`, `failed`, or `complete`. `retry` requeues failed work with the same source and ID. To correct the source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
+The direct submission returns a durable acquisition ID immediately. Use that ID with `status` to inspect `pending`, `running`, `unresolved`, `failed`, or `complete`. `retry` requeues failed direct-URL work with the same source and ID. To correct a direct source, submit a new acquisition after the previous work has failed. Repeating the same active track/source returns its existing ID; a competing active source is rejected. An available track cannot be acquired again. The CLI does not automatically retry requests after connection loss.
 
 Install yt-dlp, FFmpeg, and ffprobe separately. Their executable locations and the worker limit are configurable:
 

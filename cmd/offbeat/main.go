@@ -62,6 +62,9 @@ func main() {
 		}
 		os.Exit(runMissing(configPath, homeDir))
 	case "acquire":
+		if len(rest) > 0 && rest[0] == "mapping" {
+			os.Exit(runAcquireMapping(configPath, homeDir, rest[1:]))
+		}
 		if len(rest) > 0 && rest[0] == "capture-batch" {
 			os.Exit(runAcquireCaptureBatch(configPath, homeDir, rest[1:]))
 		}
@@ -92,7 +95,7 @@ func main() {
 		if len(rest) == 2 {
 			os.Exit(runAcquire(configPath, homeDir, rest[0], rest[1]))
 		}
-		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire inspect <spotify-uri> | offbeat acquire capture <spotify-uri> | offbeat acquire capture-batch --output-dir <dir> [--state unresolved|complete] [--limit N] [--retry-failed] | offbeat acquire replay <corpus.json> | offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved")
+		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire inspect <spotify-uri> | offbeat acquire capture <spotify-uri> | offbeat acquire capture-batch --output-dir <dir> [--state unresolved|complete] [--limit N] [--retry-failed] | offbeat acquire replay <corpus.json> | offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved | offbeat acquire mapping set/show/list/remove ...")
 		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
@@ -114,7 +117,7 @@ func printHelp() {
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
 	fmt.Println("  missing       list supported desired tracks without a managed file")
-	fmt.Println("  acquire       request, inspect, or retry authorized media acquisition")
+	fmt.Println("  acquire       request, inspect, retry or map authorized media acquisition")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }

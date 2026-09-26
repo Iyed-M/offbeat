@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -312,7 +313,7 @@ func TestYouTubeAcquisitionMigrationPreservesDirectWork(t *testing.T) {
 	if _, err := d.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_url, state, error, created_at, updated_at) VALUES (?, ?, 'pending', '', 'before', 'before')`, track.URI, "https://authorized.example/one"); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := d.Migrate(ctx, nil, ""); err != nil || len(applied) != 1 || applied[0] != 5 {
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{5, 6}) {
 		t.Fatalf("migration = %v, %v", applied, err)
 	}
 	work, err := d.Acquisition(ctx, 1)

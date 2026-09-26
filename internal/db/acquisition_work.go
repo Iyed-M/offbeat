@@ -288,7 +288,10 @@ func (d *DB) RetryAcquisition(ctx context.Context, id int64) (AcquisitionWork, e
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AcquisitionWork{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE acquisition_work SET state = ?, error = '', updated_at = ? WHERE id = ?`, AcquisitionPending, acquisitionTime(), id); err != nil {
+	// Explicit retry of failed YouTube work starts a new source-selection attempt.
+	// A changed/removed manual choice can then take effect; startup recovery of
+	// interrupted running work still retains its already selected source.
+	if _, err := tx.ExecContext(ctx, `UPDATE acquisition_work SET source_url = CASE WHEN source_kind = 'youtube' THEN NULL ELSE source_url END, state = ?, error = '', updated_at = ? WHERE id = ?`, AcquisitionPending, acquisitionTime(), id); err != nil {
 		return AcquisitionWork{}, fmt.Errorf("retry acquisition work: %w", err)
 	}
 	work, err = acquisition(ctx, tx, id)

@@ -57,14 +57,16 @@ type Request struct {
 	// version field. It lets the dispatcher distinguish an invalid request
 	// from an explicitly unsupported version.
 	versionSet         bool
-	Version            int                      `json:"version"`
-	Command            string                   `json:"command"`
-	Missing            *MissingRequest          `json:"missing,omitempty"`
-	Acquire            *AcquireRequest          `json:"acquire,omitempty"`
-	AcquisitionInspect *AcquisitionTrackRequest `json:"acquisition_inspect,omitempty"`
-	AcquisitionStatus  *AcquisitionIDRequest    `json:"acquisition_status,omitempty"`
-	AcquisitionList    *AcquisitionListRequest  `json:"acquisition_list,omitempty"`
-	AcquisitionRetry   *AcquisitionIDRequest    `json:"acquisition_retry,omitempty"`
+	Version            int                       `json:"version"`
+	Command            string                    `json:"command"`
+	Missing            *MissingRequest           `json:"missing,omitempty"`
+	Acquire            *AcquireRequest           `json:"acquire,omitempty"`
+	AcquisitionInspect *AcquisitionTrackRequest  `json:"acquisition_inspect,omitempty"`
+	AcquisitionStatus  *AcquisitionIDRequest     `json:"acquisition_status,omitempty"`
+	AcquisitionList    *AcquisitionListRequest   `json:"acquisition_list,omitempty"`
+	AcquisitionRetry   *AcquisitionIDRequest     `json:"acquisition_retry,omitempty"`
+	ManualMapping      *ManualMappingRequest     `json:"manual_mapping,omitempty"`
+	ManualMappingList  *ManualMappingListRequest `json:"manual_mapping_list,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -76,7 +78,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" && name != "manual_mapping" && name != "manual_mapping_list" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -194,6 +196,44 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if parsedCommand == "acquire.retry" && acquisitionRetry == nil {
 		return errors.New("acquire.retry request requires acquisition_retry arguments")
 	}
+	var mapping *ManualMappingRequest
+	if raw, ok := fields["manual_mapping"]; ok {
+		if (parsedCommand != "acquire.mapping.set" && parsedCommand != "acquire.mapping.show" && parsedCommand != "acquire.mapping.remove") || isJSONNull(raw) {
+			return errors.New("manual_mapping arguments are only valid for mapping set/show/remove")
+		}
+		var parsed ManualMappingRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateManualMappingTrackURI(parsed.TrackURI); err != nil {
+			return err
+		}
+		if parsedCommand == "acquire.mapping.set" {
+			if err := ValidateYouTubeVideoID(parsed.VideoID); err != nil {
+				return err
+			}
+		} else if parsed.VideoID != "" {
+			return errors.New("video_id is only valid for mapping set")
+		}
+		mapping = &parsed
+	}
+	var mappingList *ManualMappingListRequest
+	if raw, ok := fields["manual_mapping_list"]; ok {
+		if parsedCommand != "acquire.mapping.list" || isJSONNull(raw) {
+			return errors.New("manual_mapping_list arguments are only valid for mapping list")
+		}
+		var parsed ManualMappingListRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateManualMappingTrackURI(parsed.AfterURI); err != nil {
+			return err
+		}
+		mappingList = &parsed
+	}
+	if (parsedCommand == "acquire.mapping.set" || parsedCommand == "acquire.mapping.show" || parsedCommand == "acquire.mapping.remove") && mapping == nil {
+		return errors.New("mapping request requires manual_mapping arguments")
+	}
 
 	r.versionSet = true
 	r.Version = parsedVersion
@@ -204,6 +244,8 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	r.AcquisitionStatus = acquisitionStatus
 	r.AcquisitionList = acquisitionList
 	r.AcquisitionRetry = acquisitionRetry
+	r.ManualMapping = mapping
+	r.ManualMappingList = mappingList
 	return nil
 }
 

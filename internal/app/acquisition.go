@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"runtime"
 	"time"
 
@@ -286,7 +287,16 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 			fail("track is no longer desired")
 			return
 		}
-		selected, err := d.resolver.Resolve(ctx, track)
+		mapping, mappingErr := d.DB.ManualYouTubeMapping(ctx, work.TrackURI)
+		var selected string
+		if mappingErr == nil {
+			selected = fmt.Sprintf("https://www.youtube.com/watch?v=%s", mapping.VideoID)
+		} else if errors.Is(mappingErr, sql.ErrNoRows) {
+			selected, err = d.resolver.Resolve(ctx, track)
+		} else {
+			fail("could not read manual YouTube mapping")
+			return
+		}
 		if errors.Is(err, acquisition.ErrUnresolved) {
 			if ctx.Err() == nil {
 				if recordErr := d.DB.UnresolveAcquisition(ctx, work.ID, err.Error()); recordErr != nil {

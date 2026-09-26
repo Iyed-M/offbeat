@@ -459,6 +459,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleAcquisition(ctx, req)
 	case "acquire.inspect":
 		return d.handleAcquisitionInspection(ctx, req)
+	case "acquire.mapping.set", "acquire.mapping.show", "acquire.mapping.list", "acquire.mapping.remove":
+		return d.handleManualMapping(ctx, req)
 	case "missing":
 		return d.handleMissing(ctx, req.Missing)
 	default:
