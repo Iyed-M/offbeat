@@ -10,7 +10,7 @@ import (
 // SelectYouTube atomically saves the choice and queues one YouTube acquisition
 // (or returns identical active work) with its source already durable. Caller holds the
 // daemon's managed-state lock and has verified the filesystem Missing state.
-func (d *DB) SelectYouTube(ctx context.Context, uri, videoID string) (AcquisitionWork, error) {
+func (d *DB) SelectYouTube(ctx context.Context, uri, videoID string, expectedRevision int64) (AcquisitionWork, error) {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return AcquisitionWork{}, err
@@ -18,6 +18,20 @@ func (d *DB) SelectYouTube(ctx context.Context, uri, videoID string) (Acquisitio
 	defer tx.Rollback()
 	if err := requireDesiredTrack(ctx, tx, uri); err != nil {
 		return AcquisitionWork{}, err
+	}
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM manual_youtube_mapping_revisions WHERE track_uri=?), 0)`, uri).Scan(&revision); err != nil {
+		return AcquisitionWork{}, err
+	}
+	if revision != expectedRevision {
+		var current string
+		err := tx.QueryRowContext(ctx, `SELECT video_id FROM manual_youtube_mappings WHERE track_uri=?`, uri).Scan(&current)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return AcquisitionWork{}, err
+		}
+		if current != videoID { // An identical choice remains idempotent.
+			return AcquisitionWork{}, fmt.Errorf("%w: mapping changed since inspection", ErrAcquisitionConflict)
+		}
 	}
 	url := "https://www.youtube.com/watch?v=" + videoID
 	active, err := acquisitionByTrackAndStates(ctx, tx, uri, AcquisitionPending, AcquisitionRunning)

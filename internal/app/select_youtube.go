@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
@@ -24,30 +23,14 @@ func (d *Daemon) handleYouTubeSelection(ctx context.Context, req ipc.Request) (a
 	if c.ExpectedTitle == "" || len(c.ExpectedArtists) == 0 || len(c.ExpectedArtistURIs) != len(c.ExpectedArtists) || c.ExpectedDurationMS <= 0 {
 		return nil, ipc.NewError(ipc.CodeInvalidRequest, "selection requires inspected title, artists and duration")
 	}
-	// The fresh search (including fixture inspectors) is outside managedMu.
-	inspection, err := d.handleAcquisitionInspection(ctx, ipc.Request{AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: c.TrackURI}})
+	evidence, err := d.verifySelection(c.SelectionReceipt)
 	if err != nil {
-		return nil, err
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
 	}
-	report := inspection.(acquisition.ResolutionInspection)
-	if !report.FreshSearch || report.Track.URI != c.TrackURI {
-		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "inspection is stale; refresh candidates")
+	if evidence.Track.URI != c.TrackURI || evidence.VideoID != c.VideoID {
+		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "selection differs from inspected candidate")
 	}
-	var reason string
-	found := false
-	for _, candidate := range report.Candidates {
-		if candidate.VideoID == c.VideoID {
-			if !candidate.Eligible && candidate.RejectionReason == "" {
-				return nil, ipc.NewError(ipc.CodeFailedPrecondition, "candidate eligibility is unknown; refresh inspection")
-			}
-			found = true
-			reason = string(candidate.RejectionReason)
-			break
-		}
-	}
-	if !found {
-		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "video ID is not in the fresh inspection; refresh candidates")
-	}
+	reason := string(evidence.Reason)
 	if reason != c.RejectionReason {
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "candidate eligibility changed; refresh inspection")
 	}
@@ -70,18 +53,18 @@ func (d *Daemon) handleYouTubeSelection(ctx context.Context, req ipc.Request) (a
 	if err != nil {
 		return nil, ipc.NewError(ipc.CodeInternal, "could not read desired track")
 	}
-	if track.Name != c.ExpectedTitle || track.DurationMS != c.ExpectedDurationMS || track.Album.Name != c.ExpectedAlbum || track.Album.URI != c.ExpectedAlbumURI || len(track.Artists) != len(c.ExpectedArtists) || report.Track.Title != track.Name || report.Track.DurationMS != track.DurationMS || report.Track.Album.Name != track.Album.Name || report.Track.Album.URI != track.Album.URI || len(report.Track.Artists) != len(track.Artists) {
+	if track.Name != c.ExpectedTitle || track.DurationMS != c.ExpectedDurationMS || track.Album.Name != c.ExpectedAlbum || track.Album.URI != c.ExpectedAlbumURI || len(track.Artists) != len(c.ExpectedArtists) || evidence.Track.Title != track.Name || evidence.Track.DurationMS != track.DurationMS || evidence.Track.Album.Name != track.Album.Name || evidence.Track.Album.URI != track.Album.URI || len(evidence.Track.Artists) != len(track.Artists) {
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "Spotify metadata changed; refresh inspection")
 	}
 	for i, artist := range track.Artists {
-		if artist.Name != c.ExpectedArtists[i] || artist.URI != c.ExpectedArtistURIs[i] || report.Track.Artists[i].Name != artist.Name || report.Track.Artists[i].URI != artist.URI {
+		if artist.Name != c.ExpectedArtists[i] || artist.URI != c.ExpectedArtistURIs[i] || evidence.Track.Artists[i].Name != artist.Name || evidence.Track.Artists[i].URI != artist.URI {
 			return nil, ipc.NewError(ipc.CodeFailedPrecondition, "Spotify metadata changed; refresh inspection")
 		}
 	}
 	if err := d.requireMissingTrack(ctx, c.TrackURI); err != nil {
 		return nil, err
 	}
-	work, err := d.DB.SelectYouTube(ctx, c.TrackURI, c.VideoID)
+	work, err := d.DB.SelectYouTube(ctx, c.TrackURI, c.VideoID, evidence.Revision)
 	if errors.Is(err, db.ErrAcquisitionConflict) {
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, err.Error())
 	}

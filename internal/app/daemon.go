@@ -48,6 +48,9 @@ type Daemon struct {
 	livenessInterval   time.Duration
 	managedFiles       *managed.Files
 	managedMu          sync.Mutex
+	selectionKeyOnce   sync.Once
+	selectionKey       [32]byte
+	selectionKeyErr    error
 	retriever          acquisition.Retriever
 	resolver           acquisition.Resolver
 	inspector          acquisition.Inspector

@@ -299,7 +299,7 @@ func newReviewHandler(host, token string, control reviewControl) http.Handler {
 									video.Score = fmt.Sprint(*candidate.Score)
 								}
 								if candidate.VideoID == raw.ID && ipc.ValidateYouTubeVideoID(raw.ID) == nil {
-									choice := ipc.AcquisitionChoice{TrackURI: uri, VideoID: raw.ID, ExpectedTitle: report.Track.Title, ExpectedDurationMS: report.Track.DurationMS, ExpectedAlbum: report.Track.Album.Name, ExpectedAlbumURI: report.Track.Album.URI, RejectionReason: string(candidate.RejectionReason)}
+									choice := ipc.AcquisitionChoice{TrackURI: uri, VideoID: raw.ID, SelectionReceipt: candidate.SelectionReceipt, ExpectedTitle: report.Track.Title, ExpectedDurationMS: report.Track.DurationMS, ExpectedAlbum: report.Track.Album.Name, ExpectedAlbumURI: report.Track.Album.URI, RejectionReason: string(candidate.RejectionReason)}
 									for _, artist := range report.Track.Artists {
 										choice.ExpectedArtists = append(choice.ExpectedArtists, artist.Name)
 										choice.ExpectedArtistURIs = append(choice.ExpectedArtistURIs, artist.URI)

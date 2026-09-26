@@ -60,6 +60,43 @@ func (d *Daemon) handleAcquisitionInspection(ctx context.Context, req ipc.Reques
 	}
 	report.Producer.DecisionTool = acquisition.CaptureTool{Name: "offbeatd", Version: d.version}
 	report.Producer.Environment = acquisition.CaptureEnvironment{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	if report.ReportVersion != acquisition.ResolutionInspectionVersion || !report.FreshSearch || report.Track.URI != track.URI || len(report.Search.RawResults) > acquisition.MaxYouTubeSearchCandidates || len(report.Candidates) > acquisition.MaxYouTubeSearchCandidates || report.Track.Title != track.Name || report.Track.DurationMS != track.DurationMS || report.Track.Album.Name != track.Album.Name || report.Track.Album.URI != track.Album.URI || len(report.Track.Artists) != len(track.Artists) {
+		return nil, ipc.NewError(ipc.CodeInternal, "invalid YouTube inspection")
+	}
+	for i, artist := range track.Artists {
+		if report.Track.Artists[i].Name != artist.Name || report.Track.Artists[i].URI != artist.URI {
+			return nil, ipc.NewError(ipc.CodeInternal, "invalid YouTube inspection")
+		}
+	}
+	// Read the mapping state after the search. A concurrent edit after this
+	// snapshot is rejected by the transactional revision check at selection.
+	d.managedMu.Lock()
+	revision, err := d.DB.MappingRevision(ctx, track.URI)
+	d.managedMu.Unlock()
+	if err != nil {
+		return nil, ipc.NewError(ipc.CodeInternal, "could not read mapping state")
+	}
+	for i := range report.Candidates {
+		candidate := &report.Candidates[i]
+		if ipc.ValidateYouTubeVideoID(candidate.VideoID) != nil || (candidate.Eligible && candidate.RejectionReason != "") || (!candidate.Eligible && candidate.RejectionReason == "") {
+			continue
+		}
+		// Only sign IDs actually present in the bounded raw observation.
+		found := false
+		for _, raw := range report.Search.RawResults {
+			if raw.ID == candidate.VideoID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		candidate.SelectionReceipt, err = d.signSelection(selectionEvidence{Track: report.Track, VideoID: candidate.VideoID, Reason: candidate.RejectionReason, Revision: revision, Issued: time.Now().Unix()})
+		if err != nil {
+			return nil, ipc.NewError(ipc.CodeInternal, "could not issue inspection receipt")
+		}
+	}
 	encoded, err := ipc.Encode(ipc.Response{Version: ipc.ProtocolVersion, Result: report})
 	if err != nil || len(encoded)+1 > ipc.MaxMessageBytes {
 		return nil, ipc.NewError(ipc.CodeInternal, "YouTube inspection report exceeds the Control protocol response limit")

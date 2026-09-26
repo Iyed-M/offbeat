@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Iyed-M/offbeat/internal/desired"
@@ -31,7 +32,7 @@ func TestManualMappingMigrationCRUDAndSpotifyRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if versions, err := d.Migrate(ctx, nil, ""); err != nil || len(versions) != 1 || versions[0] != 6 {
+	if versions, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(versions, []int{6, 7}) {
 		t.Fatalf("upgrade: %v, %v", versions, err)
 	}
 	uri := "spotify:track:one"

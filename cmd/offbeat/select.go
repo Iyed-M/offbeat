@@ -43,6 +43,7 @@ func runAcquireSelect(configPath, homeDir string, args []string) int {
 			continue
 		}
 		found = true
+		c.SelectionReceipt = candidate.SelectionReceipt
 		c.RejectionReason = string(candidate.RejectionReason)
 		break
 	}

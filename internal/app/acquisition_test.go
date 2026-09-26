@@ -362,11 +362,15 @@ func TestAcquisitionInspectionReportsUnknownSearchFailureAndOversizedReportAsErr
 		t.Fatalf("search failure = %#v, %v", result, err)
 	}
 	d.inspector = inspectFunc(func(_ context.Context, track desired.Track) (acquisition.ResolutionInspection, error) {
+		artists := make([]acquisition.InspectionNamedURI, 0, len(track.Artists))
+		for _, artist := range track.Artists {
+			artists = append(artists, acquisition.InspectionNamedURI{URI: artist.URI, Name: artist.Name})
+		}
 		return acquisition.ResolutionInspection{
 			ReportVersion: acquisition.ResolutionInspectionVersion,
 			FreshSearch:   true,
 			CapturedAt:    time.Now().UTC(),
-			Track:         acquisition.InspectionTrack{URI: track.URI},
+			Track:         acquisition.InspectionTrack{URI: track.URI, Title: track.Name, Artists: artists, Album: acquisition.InspectionNamedURI{URI: track.Album.URI, Name: track.Album.Name}, DurationMS: track.DurationMS},
 			Search: acquisition.InspectionSearch{CandidateLimit: acquisition.MaxYouTubeSearchCandidates, RawResults: []acquisition.YouTubeSearchResult{{
 				ID: "aaaaaaaaaaa", Title: strings.Repeat("x", ipc.MaxMessageBytes),
 			}}},

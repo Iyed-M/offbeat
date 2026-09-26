@@ -47,7 +47,24 @@ func selectionFixture(t *testing.T) (*Daemon, *ipc.AcquisitionChoice, string) {
 	c := &ipc.AcquisitionChoice{TrackURI: track.URI, VideoID: "abcdefghijk", ExpectedTitle: track.Name,
 		ExpectedArtists: []string{track.Artists[0].Name}, ExpectedArtistURIs: []string{track.Artists[0].URI},
 		ExpectedAlbum: track.Album.Name, ExpectedAlbumURI: track.Album.URI, ExpectedDurationMS: track.DurationMS}
+	inspectChoice(t, d, c)
 	return d, c, home
+}
+
+func inspectChoice(t *testing.T, d *Daemon, c *ipc.AcquisitionChoice) {
+	t.Helper()
+	result, err := d.handleAcquisitionInspection(context.Background(), ipc.Request{AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: c.TrackURI}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range result.(acquisition.ResolutionInspection).Candidates {
+		if candidate.VideoID == c.VideoID {
+			c.SelectionReceipt = candidate.SelectionReceipt
+			c.RejectionReason = string(candidate.RejectionReason)
+			return
+		}
+	}
+	t.Fatal("candidate not inspected")
 }
 
 func TestSelectYouTubeReusesUnresolvedAndFailedWithDurableSource(t *testing.T) {
@@ -90,15 +107,7 @@ func TestSelectYouTubeReusesUnresolvedAndFailedWithDurableSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.VideoID = "ZYXWvu_987-"
-	report, err := d.handleAcquisitionInspection(ctx, ipc.Request{AcquisitionInspect: &ipc.AcquisitionTrackRequest{TrackURI: c.TrackURI}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, candidate := range report.(acquisition.ResolutionInspection).Candidates {
-		if candidate.VideoID == c.VideoID {
-			c.RejectionReason = string(candidate.RejectionReason)
-		}
-	}
+	inspectChoice(t, d, c)
 	if c.RejectionReason == "" {
 		t.Fatal("fixture did not reject replacement")
 	}
@@ -258,6 +267,7 @@ func TestSelectYouTubeRechecksStateAfterSearchAndRollsBackOnFailure(t *testing.T
 		seedAcquisitionTracks(t, d)
 		return base.Inspect(ctx, track)
 	})
+	inspectChoice(t, d, c)
 	_, err := d.handleYouTubeSelection(context.Background(), ipc.Request{AcquisitionChoice: c})
 	if err == nil || !strings.Contains(err.Error(), "not currently desired") {
 		t.Fatalf("removed mid-search: %v", err)
@@ -276,5 +286,120 @@ func TestSelectYouTubeRechecksStateAfterSearchAndRollsBackOnFailure(t *testing.T
 	work, err := d.DB.AcquisitionsAfter(context.Background(), 0, 10)
 	if err != nil || len(work) != 0 {
 		t.Fatalf("work committed without mapping: %#v %v", work, err)
+	}
+}
+
+func TestSelectionConfirmsInspectedIDWithoutAnotherSearch(t *testing.T) {
+	d, c, _ := selectionFixture(t)
+	d.inspector = inspectFunc(func(context.Context, desired.Track) (acquisition.ResolutionInspection, error) {
+		t.Error("confirmation searched again")
+		return acquisition.ResolutionInspection{}, errors.New("search order changed")
+	})
+	if _, err := d.handleYouTubeSelection(context.Background(), ipc.Request{AcquisitionChoice: c}); err != nil {
+		t.Fatalf("inspected ID not confirmed: %v", err)
+	}
+	work, err := d.DB.Acquisition(context.Background(), 1)
+	if err != nil || work.SourceURL != "https://www.youtube.com/watch?v=abcdefghijk" {
+		t.Fatalf("wrong selected ID: %#v %v", work, err)
+	}
+}
+
+func TestSelectionReceiptRejectsForgeryAndRestart(t *testing.T) {
+	d, c, _ := selectionFixture(t)
+	ctx := context.Background()
+	forged := *c
+	forged.VideoID = "ZYXWvu_987-"
+	forged.RejectionReason = ""
+	forged.AcknowledgeRejection = ""
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &forged}); err == nil {
+		t.Fatal("accepted receipt for different candidate")
+	}
+	forged = *c
+	forged.SelectionReceipt = c.SelectionReceipt[:len(c.SelectionReceipt)-1] + "x"
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &forged}); err == nil {
+		t.Fatal("accepted forged signature")
+	}
+	rejected := *c
+	rejected.VideoID = "ZYXWvu_987-"
+	inspectChoice(t, d, &rejected)
+	rejected.RejectionReason = ""
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &rejected}); err == nil {
+		t.Fatal("accepted forged eligibility")
+	}
+	rejected.RejectionReason = "title_mismatch"
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &rejected}); err == nil {
+		t.Fatal("accepted rejected candidate without acknowledgment")
+	}
+	d2 := &Daemon{} // a restarted process has a different signing key
+	if _, err := d2.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err == nil {
+		t.Fatal("accepted prior process receipt")
+	}
+	evidence, err := d.verifySelection(c.SelectionReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.Issued = time.Now().Add(-selectionReceiptLifetime - time.Minute).Unix()
+	expired, err := d.signSelection(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := *c
+	old.SelectionReceipt = expired
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &old}); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("accepted expired inspection: %v", err)
+	}
+}
+
+func TestSelectionMappingRevisionRejectsStaleAndAllowsFreshReplacement(t *testing.T) {
+	d, c, _ := selectionFixture(t)
+	ctx := context.Background()
+	if _, err := d.DB.SetManualYouTubeMapping(ctx, c.TrackURI, "ZYXWvu_987-"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err == nil || !strings.Contains(err.Error(), "mapping changed") {
+		t.Fatalf("stale mapping: %v", err)
+	}
+	if err := d.DB.RemoveManualYouTubeMapping(ctx, c.TrackURI); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err == nil || !strings.Contains(err.Error(), "mapping changed") {
+		t.Fatalf("removed mapping tombstone: %v", err)
+	}
+	inspectChoice(t, d, c)
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err != nil {
+		t.Fatalf("same choice: %v", err)
+	}
+}
+
+func TestConcurrentDifferentSelectionReceiptsCannotOverwriteNewMapping(t *testing.T) {
+	d, first, _ := selectionFixture(t)
+	second := *first
+	second.VideoID = "ZYXWvu_987-"
+	inspectChoice(t, d, &second)
+	second.AcknowledgeRejection = second.RejectionReason
+	choices := []*ipc.AcquisitionChoice{first, &second}
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for _, choice := range choices {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := d.handleYouTubeSelection(context.Background(), ipc.Request{AcquisitionChoice: choice})
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	success := 0
+	for err := range results {
+		if err == nil {
+			success++
+		}
+	}
+	if success != 1 {
+		t.Fatalf("expected one winner, got %d", success)
 	}
 }

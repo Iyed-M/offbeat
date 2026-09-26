@@ -19,6 +19,7 @@ type ManualMappingRequest struct {
 type AcquisitionChoice struct {
 	TrackURI             string   `json:"track_uri"`
 	VideoID              string   `json:"video_id"`
+	SelectionReceipt     string   `json:"selection_receipt"`
 	ExpectedTitle        string   `json:"expected_title"`
 	ExpectedArtists      []string `json:"expected_artists"`
 	ExpectedArtistURIs   []string `json:"expected_artist_uris"`

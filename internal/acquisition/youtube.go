@@ -141,6 +141,7 @@ type InspectionSearch struct {
 // remain visible without allowing the duplicate to influence ranking.
 type CandidateEvidence struct {
 	VideoID                  string           `json:"video_id"`
+	SelectionReceipt         string           `json:"selection_receipt,omitempty"`
 	FirstSearchPosition      int              `json:"first_search_position"`
 	DuplicateSearchPositions []int            `json:"duplicate_search_positions"`
 	CandidateVersionMarkers  []string         `json:"candidate_version_markers"`
