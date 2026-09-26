@@ -365,6 +365,12 @@ func TestSelectionMappingRevisionRejectsStaleAndAllowsFreshReplacement(t *testin
 	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err == nil || !strings.Contains(err.Error(), "mapping changed") {
 		t.Fatalf("removed mapping tombstone: %v", err)
 	}
+	if _, err := d.DB.SetManualYouTubeMapping(ctx, c.TrackURI, c.VideoID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err == nil || !strings.Contains(err.Error(), "mapping changed") {
+		t.Fatalf("recreated same video must not revive stale inspection: %v", err)
+	}
 	inspectChoice(t, d, c)
 	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: c}); err != nil {
 		t.Fatal(err)

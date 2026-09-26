@@ -23,16 +23,6 @@ func (d *DB) SelectYouTube(ctx context.Context, uri, videoID string, expectedRev
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM manual_youtube_mapping_revisions WHERE track_uri=?), 0)`, uri).Scan(&revision); err != nil {
 		return AcquisitionWork{}, err
 	}
-	if revision != expectedRevision {
-		var current string
-		err := tx.QueryRowContext(ctx, `SELECT video_id FROM manual_youtube_mappings WHERE track_uri=?`, uri).Scan(&current)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return AcquisitionWork{}, err
-		}
-		if current != videoID { // An identical choice remains idempotent.
-			return AcquisitionWork{}, fmt.Errorf("%w: mapping changed since inspection", ErrAcquisitionConflict)
-		}
-	}
 	url := "https://www.youtube.com/watch?v=" + videoID
 	active, err := acquisitionByTrackAndStates(ctx, tx, uri, AcquisitionPending, AcquisitionRunning)
 	if err == nil {
@@ -43,6 +33,19 @@ func (d *DB) SelectYouTube(ctx context.Context, uri, videoID string, expectedRev
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return AcquisitionWork{}, err
+	}
+	if revision != expectedRevision {
+		var current string
+		err := tx.QueryRowContext(ctx, `SELECT video_id FROM manual_youtube_mappings WHERE track_uri=?`, uri).Scan(&current)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return AcquisitionWork{}, err
+		}
+		// A repeated confirmation can observe the same active work. Once it
+		// finishes, an older receipt must not restart work after any edit,
+		// including removal and recreation with the same video ID.
+		if current != videoID || active.ID == 0 {
+			return AcquisitionWork{}, fmt.Errorf("%w: mapping changed since inspection", ErrAcquisitionConflict)
+		}
 	}
 	if active.ID == 0 {
 		// Prefer the most recent reusable YouTube attempt. A completed work
