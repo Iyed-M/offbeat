@@ -68,6 +68,7 @@ type Request struct {
 	ManualMapping      *ManualMappingRequest     `json:"manual_mapping,omitempty"`
 	ManualMappingList  *ManualMappingListRequest `json:"manual_mapping_list,omitempty"`
 	AcquisitionChoice  *AcquisitionChoice        `json:"acquisition_choice,omitempty"`
+	ReviewList         *ReviewListRequest        `json:"review_list,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -79,7 +80,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" && name != "manual_mapping" && name != "manual_mapping_list" && name != "acquisition_choice" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" && name != "manual_mapping" && name != "manual_mapping_list" && name != "acquisition_choice" && name != "review_list" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -258,6 +259,20 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if parsedCommand == "acquire.select" && choice == nil {
 		return errors.New("acquire.select requires acquisition_choice")
 	}
+	var reviewList *ReviewListRequest
+	if raw, ok := fields["review_list"]; ok {
+		if parsedCommand != "review.list" || isJSONNull(raw) {
+			return errors.New("review_list arguments are only valid for review.list")
+		}
+		var parsed ReviewListRequest
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateManualMappingTrackURI(parsed.AfterURI); err != nil {
+			return err
+		}
+		reviewList = &parsed
+	}
 
 	r.versionSet = true
 	r.Version = parsedVersion
@@ -271,6 +286,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	r.ManualMapping = mapping
 	r.ManualMappingList = mappingList
 	r.AcquisitionChoice = choice
+	r.ReviewList = reviewList
 	return nil
 }
 

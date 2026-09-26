@@ -61,6 +61,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runMissing(configPath, homeDir))
+	case "review":
+		if len(rest) != 0 {
+			fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat review")
+			os.Exit(2)
+		}
+		os.Exit(runReview(configPath, homeDir))
 	case "acquire":
 		if len(rest) > 0 && rest[0] == "select" {
 			os.Exit(runAcquireSelect(configPath, homeDir, rest[1:]))
@@ -121,6 +127,7 @@ func printHelp() {
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
 	fmt.Println("  missing       list supported desired tracks without a managed file")
 	fmt.Println("  acquire       request, inspect, retry or map authorized media acquisition")
+	fmt.Println("  review        browse unresolved YouTube work in a temporary local page")
 	fmt.Println()
 	fmt.Println("More commands arrive in later milestones.")
 }

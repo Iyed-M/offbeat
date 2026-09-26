@@ -461,6 +461,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleAcquisitionInspection(ctx, req)
 	case "acquire.select":
 		return d.handleYouTubeSelection(ctx, req)
+	case "review.list":
+		return d.handleReviewList(ctx, req)
 	case "acquire.mapping.set", "acquire.mapping.show", "acquire.mapping.list", "acquire.mapping.remove":
 		return d.handleManualMapping(ctx, req)
 	case "missing":

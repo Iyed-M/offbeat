@@ -172,6 +172,29 @@ func TestDecodeRejectsInvalidAcquisitionRequestShapes(t *testing.T) {
 	}
 }
 
+func TestReviewListRequestIsReadOnlyAndBoundedToItsCommand(t *testing.T) {
+	for _, payload := range []string{
+		`{"version":1,"command":"review.list"}`,
+		`{"version":1,"command":"review.list","review_list":{"after_uri":"spotify:track:abc"}}`,
+	} {
+		var req ipc.Request
+		if err := ipc.Decode([]byte(payload), &req); err != nil || req.Command != "review.list" {
+			t.Fatalf("decode %s: %#v %v", payload, req, err)
+		}
+	}
+	for _, payload := range []string{
+		`{"version":1,"command":"review.list","review_list":null}`,
+		`{"version":1,"command":"review.list","review_list":{"after_uri":"spotify:playlist:abc"}}`,
+		`{"version":1,"command":"review.list","review_list":{"after_uri":"spotify:track:abc","limit":999}}`,
+		`{"version":1,"command":"status","review_list":{"after_uri":"spotify:track:abc"}}`,
+	} {
+		var req ipc.Request
+		if err := ipc.Decode([]byte(payload), &req); err == nil {
+			t.Fatalf("accepted %s", payload)
+		}
+	}
+}
+
 func TestValidateAcquisitionSource(t *testing.T) {
 	for _, raw := range []string{
 		"http://127.0.0.1:8080/media.wav",

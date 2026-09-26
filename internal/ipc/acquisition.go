@@ -46,6 +46,25 @@ type ManualMappingPage struct {
 	NextAfterURI string                `json:"next_after_uri,omitempty"`
 }
 
+// ReviewPage is a current-state projection; no search results are persisted.
+type ReviewListRequest struct {
+	AfterURI string `json:"after_uri"`
+}
+
+type ReviewTrack struct {
+	TrackURI   string   `json:"track_uri"`
+	Title      string   `json:"title"`
+	Artists    []string `json:"artists"`
+	DurationMS int      `json:"duration_ms"`
+	WorkState  string   `json:"work_state"`
+	WorkError  string   `json:"work_error,omitempty"`
+}
+
+type ReviewPage struct {
+	Tracks       []ReviewTrack `json:"tracks"`
+	NextAfterURI string        `json:"next_after_uri,omitempty"`
+}
+
 func ValidateYouTubeVideoID(id string) error {
 	if len(id) != 11 {
 		return fmt.Errorf("video_id must be exactly 11 YouTube ID characters")
