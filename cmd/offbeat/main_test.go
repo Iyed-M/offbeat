@@ -424,6 +424,7 @@ port = %d
 		"socket_dir",
 		"acquisition:",
 		"concurrency        : 4",
+		"ambiguity_policy  : manual",
 		"downloader:",
 		"yt_dlp_path  : /usr/local/bin/yt-dlp",
 	} {

@@ -26,6 +26,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Acquisition.Concurrency != 2 {
 		t.Errorf("Concurrency = %d, want 2", cfg.Acquisition.Concurrency)
 	}
+	if cfg.Acquisition.AmbiguityPolicy != AmbiguityManual {
+		t.Fatalf("default ambiguity policy = %q", cfg.Acquisition.AmbiguityPolicy)
+	}
 	if cfg.Downloader.YTDLPPath != "yt-dlp" {
 		t.Errorf("YTDLPPath = %q", cfg.Downloader.YTDLPPath)
 	}
@@ -190,6 +193,30 @@ func TestAcquisitionConcurrencyBounds(t *testing.T) {
 			}
 			if _, err := NewLoader(home, path).Load(); err == nil {
 				t.Fatal("invalid concurrency accepted")
+			}
+		})
+	}
+}
+
+func TestAmbiguityPolicyConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{`manual`, true}, {`auto_best`, true}, {`automatic`, false}, {`MANUAL`, false}, {``, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "config.toml")
+			if err := os.WriteFile(path, []byte("[acquisition]\nambiguity_policy = \""+tc.value+"\"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := NewLoader(home, path).Load()
+			if (err == nil) != tc.valid {
+				t.Fatalf("Load() = %q, %v", cfg.Acquisition.AmbiguityPolicy, err)
+			}
+			if tc.valid && cfg.Acquisition.AmbiguityPolicy != tc.value {
+				t.Fatalf("policy = %q", cfg.Acquisition.AmbiguityPolicy)
 			}
 		})
 	}

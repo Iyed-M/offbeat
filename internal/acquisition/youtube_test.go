@@ -444,3 +444,53 @@ func TestSelectYouTubeCandidateLeavesUnsafeCasesUnresolved(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoBestOnlyBypassesMargin(t *testing.T) {
+	track := youtubeTrack("Teardrop", 330_000)
+	good := youtubeCandidate{ID: "aaaaaaaaaaa", Title: "Massive Attack - Teardrop", Channel: "Massive Attack", Duration: 330}
+	second := good
+	second.ID = "bbbbbbbbbbb"
+	weakTrack := youtubeTrack("Angel", 360_000)
+	weak := youtubeCandidate{ID: "weakwinner1", Title: "Massive Attack - Angel Eyes", Channel: "Massive Attack", Duration: 360}
+	conflict := good
+	conflict.ID, conflict.Title = "00000000000", "Massive Attack - Teardrop (Live)"
+	closer := good
+	closer.ID = "zzzzzzzzzzz"
+	further := good
+	further.Duration = 330.1
+	for _, tc := range []struct {
+		name    string
+		results []youtubeCandidate
+		winner  string
+		reason  ResolutionReason
+	}{
+		{"tie order reversed", []youtubeCandidate{second, good, conflict}, good.ID, ""},
+		{"same score closer duration wins before ID", []youtubeCandidate{further, closer}, closer.ID, ""},
+		{"weak winner", []youtubeCandidate{weak}, "", ResolutionWeakWinner},
+		{"version conflict", []youtubeCandidate{conflict}, "", ResolutionVersion},
+		{"no results", nil, "", ResolutionNoCandidates},
+		{"deduplication", []youtubeCandidate{good, good}, good.ID, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			matchTrack := track
+			if tc.name == "weak winner" {
+				matchTrack = weakTrack
+			}
+			report := inspectYouTubeCandidatesWithPolicy(matchTrack, BuildYouTubeQuery(matchTrack), tc.results, time.Time{}, config.AmbiguityAutoBest)
+			if report.Policy != config.AmbiguityAutoBest || report.Diagnostic.Policy != config.AmbiguityAutoBest || report.Decision.WinnerVideoID != tc.winner && tc.winner != "" || report.Decision.UnresolvedReason != tc.reason {
+				t.Fatalf("report = %#v", report)
+			}
+			if tc.winner != "" {
+				if report.Decision.SelectedURL != "https://www.youtube.com/watch?v="+tc.winner || report.Decision.SelectionReason == "" {
+					t.Fatalf("selection = %#v", report.Decision)
+				}
+			} else if report.Decision.SelectedURL != "" {
+				t.Fatalf("unexpected selection = %#v", report.Decision)
+			}
+		})
+	}
+	manual := inspectYouTubeCandidates(track, BuildYouTubeQuery(track), []youtubeCandidate{second, good}, time.Time{})
+	if manual.Decision.UnresolvedReason != ResolutionAmbiguous || manual.Decision.SelectedURL != "" {
+		t.Fatalf("manual tie = %#v", manual.Decision)
+	}
+}

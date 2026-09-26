@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Iyed-M/offbeat/internal/config"
+	"github.com/Iyed-M/offbeat/internal/desired"
 )
 
 func evaluationTestProvenance() CaptureProvenance {
@@ -198,7 +201,45 @@ func TestEvaluationFailureReportOmitsReplayAndDecisionComparison(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"capture_id":"search-failure","outcome":"search_failure","failure":{"stage":"search"}}` {
+	if string(data) != `{"capture_id":"search-failure","selection_policy":"manual","outcome":"search_failure","failure":{"stage":"search"}}` {
 		t.Fatalf("failure result = %s", data)
+	}
+}
+
+func TestPolicyCaptureAndReplayPreserveLegacyManualDecision(t *testing.T) {
+	track := desired.Track{URI: "spotify:track:policy", Name: "Song", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 200_000}
+	results := []YouTubeSearchResult{
+		{ID: "bbbbbbbbbbb", Title: "Artist - Song", Uploader: "Artist", Duration: 200},
+		{ID: "aaaaaaaaaaa", Title: "Artist - Song", Uploader: "Artist", Duration: 200},
+	}
+	query := BuildYouTubeQuery(track)
+	when := time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)
+	manual := inspectYouTubeCandidates(track, query, results, when)
+	legacy := EvaluationCapture{CaptureID: "legacy", Provenance: evaluationTestProvenance(), Observation: &ResolutionObservation{CapturedAt: when, Track: manual.Track, Query: query, Search: manual.Search, RecordedDecision: manual.Decision}, Annotations: HumanAnnotations{Candidates: []CandidateAnnotation{}}}
+	auto := inspectYouTubeCandidatesWithPolicy(track, query, results, when, config.AmbiguityAutoBest)
+	auto.Producer = evaluationTestProvenance().Producer
+	auto.FreshSearch = true
+	newCorpus, err := NewEvaluationCorpus("auto", "test", auto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCorpus.Captures[0].Observation.Policy != config.AmbiguityAutoBest || newCorpus.Captures[0].Provenance.Policy != config.AmbiguityAutoBest {
+		t.Fatalf("capture = %#v", newCorpus)
+	}
+	corpus := EvaluationCorpus{FormatVersion: EvaluationFormatVersion, Captures: []EvaluationCapture{legacy, newCorpus.Captures[0], legacy}}
+	corpus.Captures[2].CaptureID = "legacy-again"
+	report, err := ReplayEvaluationCorpus(corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != "mixed" || report.Cases[0].Replay.Policy != config.AmbiguityManual || report.Cases[1].Replay.Policy != config.AmbiguityAutoBest || report.Cases[0].DecisionMatchesRecorded == nil || !*report.Cases[0].DecisionMatchesRecorded || report.Cases[1].DecisionMatchesRecorded == nil || !*report.Cases[1].DecisionMatchesRecorded {
+		t.Fatalf("replay = %#v", report)
+	}
+	if report.Cases[0].Replay.Decision.SelectedURL != "" || report.Cases[1].Replay.Decision.SelectedURL != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+		t.Fatalf("decisions = %#v", report.Cases)
+	}
+	newCorpus.Captures[0].Observation.Policy = config.AmbiguityManual
+	if err := ValidateEvaluationCorpus(newCorpus); err == nil {
+		t.Fatal("inconsistent policy accepted")
 	}
 }

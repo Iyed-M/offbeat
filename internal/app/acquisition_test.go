@@ -668,6 +668,60 @@ func TestSelectedYouTubeURLSurvivesRestart(t *testing.T) {
 	waitAcquisition(t, d, work.ID, "complete")
 }
 
+func TestAutoBestRequiresExplicitRetryAndPersistsSourceBeforeRetrieval(t *testing.T) {
+	home, err := os.MkdirTemp("", "offbeat-policy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	tool := writeInspectionTool(t, t.TempDir(), "yt-dlp", `printf '%s\n' '{"entries":[{"id":"bbbbbbbbbbb","title":"Artist - one","channel":"Artist","duration":1},{"id":"aaaaaaaaaaa","title":"Artist - one","channel":"Artist","duration":1}]}'`)
+	configPath := filepath.Join(home, "config.toml")
+	writeConfig := func(policy string) {
+		text := fmt.Sprintf("[spotify_adapter]\nport=%d\n[downloader]\nyt_dlp_path=%q\n[acquisition]\nambiguity_policy=%q\n", availableAdapterTestPort(t), tool, policy)
+		if err := os.WriteFile(configPath, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newDaemon := func() *Daemon {
+		d, err := NewDaemon(context.Background(), Options{HomeDir: home, ConfigPath: configPath, AdapterCredential: testAdapterCredential, Retriever: retrieveFunc(func(_ context.Context, url string) (*acquisition.Media, error) {
+			if url != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+				t.Errorf("retrieval URL = %q", url)
+			}
+			return nil, errors.New("controlled retrieval failure")
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	writeConfig(config.AmbiguityManual)
+	d := newDaemon()
+	seedAcquisitionTracks(t, d, "one")
+	stop := runAcquisitionDaemon(t, d)
+	if batch := acquireBatchControl(t, d); batch.Queued != 1 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	waitAcquisition(t, d, 1, "unresolved")
+	stop()
+	writeConfig(config.AmbiguityAutoBest)
+	d = newDaemon()
+	runAcquisitionDaemon(t, d)
+	if inspection := inspectControl(t, d, "spotify:track:one"); inspection.Policy != config.AmbiguityAutoBest || inspection.Decision.WinnerVideoID != "aaaaaaaaaaa" {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	if work := acquireControl(t, d, ipc.Request{Command: "acquire.status", AcquisitionStatus: &ipc.AcquisitionIDRequest{ID: 1}}); work.State != "unresolved" {
+		t.Fatalf("config change retried work: %#v", work)
+	}
+	if retry := retryUnresolvedControl(t, d); retry.Queued != 1 {
+		t.Fatalf("retry = %#v", retry)
+	}
+	waitAcquisition(t, d, 1, "failed")
+	work, err := d.DB.Acquisition(context.Background(), 1)
+	if err != nil || work.SourceURL != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+		t.Fatalf("persisted source = %#v, %v", work, err)
+	}
+}
+
 func TestAcquisitionBoundedConcurrencyAndRestart(t *testing.T) {
 	started := make(chan struct{}, 4)
 	var active, maxActive atomic.Int32

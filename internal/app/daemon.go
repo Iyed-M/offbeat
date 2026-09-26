@@ -153,14 +153,14 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		d.retriever = acquisition.NewRetriever(cfg.Downloader)
 	}
 	if d.resolver == nil {
-		youtube := acquisition.NewYouTubeResolver(cfg.Downloader)
+		youtube := acquisition.NewYouTubeResolverWithPolicy(cfg.Downloader, cfg.Acquisition.AmbiguityPolicy)
 		d.resolver = youtube
 		if d.inspector == nil {
 			d.inspector = youtube
 		}
 	}
 	if d.inspector == nil {
-		d.inspector = acquisition.NewYouTubeResolver(cfg.Downloader)
+		d.inspector = acquisition.NewYouTubeResolverWithPolicy(cfg.Downloader, cfg.Acquisition.AmbiguityPolicy)
 	}
 
 	return d, nil
@@ -534,6 +534,7 @@ func SanitizedConfig(cfg config.Config) ipc.ConfigResult {
 			Concurrency:      cfg.Acquisition.Concurrency,
 			TempRetryBackoff: cfg.Acquisition.TempRetryBackoff.Std().String(),
 			MaxTempRetries:   cfg.Acquisition.MaxTempRetries,
+			AmbiguityPolicy:  cfg.Acquisition.AmbiguityPolicy,
 		},
 		Sync: ipc.ConfigSync{
 			HTTPSPort:      cfg.Sync.HTTPSPort,

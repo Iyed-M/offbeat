@@ -44,7 +44,13 @@ type Acquisition struct {
 	Concurrency      int      `toml:"concurrency"`
 	TempRetryBackoff Duration `toml:"temp_retry_backoff"`
 	MaxTempRetries   int      `toml:"max_temp_retries"`
+	AmbiguityPolicy  string   `toml:"ambiguity_policy"`
 }
+
+const (
+	AmbiguityManual   = "manual"
+	AmbiguityAutoBest = "auto_best"
+)
 
 type Sync struct {
 	HTTPSPort      int      `toml:"https_port"`
@@ -93,6 +99,7 @@ func Defaults(home string) Config {
 	cfg.Acquisition.Concurrency = 2
 	cfg.Acquisition.TempRetryBackoff = Duration(30 * time.Second)
 	cfg.Acquisition.MaxTempRetries = 5
+	cfg.Acquisition.AmbiguityPolicy = AmbiguityManual
 
 	cfg.Sync.HTTPSPort = 0
 	cfg.Sync.LANBindAddress = "0.0.0.0"
@@ -174,6 +181,9 @@ func (l *Loader) Load() (Config, error) {
 	}
 	if cfg.Acquisition.Concurrency < 1 || cfg.Acquisition.Concurrency > 32 {
 		return cfg, fmt.Errorf("acquisition concurrency must be between 1 and 32")
+	}
+	if cfg.Acquisition.AmbiguityPolicy != AmbiguityManual && cfg.Acquisition.AmbiguityPolicy != AmbiguityAutoBest {
+		return cfg, fmt.Errorf("acquisition ambiguity_policy must be manual or auto_best")
 	}
 	return cfg, nil
 }

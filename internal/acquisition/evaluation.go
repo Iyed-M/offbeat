@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/desired"
 )
 
@@ -61,6 +62,7 @@ type EvaluationCapture struct {
 
 type CaptureProvenance struct {
 	CapturedBy CaptureTool         `json:"captured_by"`
+	Policy     string              `json:"selection_policy,omitempty"`
 	Producer   *InspectionProducer `json:"producer,omitempty"`
 	Notes      string              `json:"notes,omitempty"`
 }
@@ -77,6 +79,7 @@ type CaptureEnvironment struct {
 }
 
 type ResolutionObservation struct {
+	Policy           string             `json:"selection_policy,omitempty"`
 	CapturedAt       time.Time          `json:"captured_at"`
 	Track            InspectionTrack    `json:"track"`
 	Query            YouTubeQuery       `json:"query"`
@@ -114,6 +117,7 @@ type EvaluationCounts struct {
 type EvaluationReport struct {
 	FormatVersion int                    `json:"format_version"`
 	PolicyVersion int                    `json:"policy_version"`
+	Policy        string                 `json:"selection_policy"`
 	Total         int                    `json:"total"`
 	Counts        EvaluationCounts       `json:"counts"`
 	Cases         []EvaluationCaseResult `json:"cases"`
@@ -121,6 +125,7 @@ type EvaluationReport struct {
 
 type EvaluationCaseResult struct {
 	CaptureID               string                `json:"capture_id"`
+	Policy                  string                `json:"selection_policy"`
 	Outcome                 EvaluationOutcome     `json:"outcome"`
 	DecisionMatchesRecorded *bool                 `json:"decision_matches_recorded,omitempty"`
 	Replay                  *ResolutionInspection `json:"replay,omitempty"`
@@ -136,6 +141,9 @@ func NewEvaluationCorpus(captureID, toolVersion string, report ResolutionInspect
 	if report.Producer == nil {
 		return EvaluationCorpus{}, errors.New("capture requires inspection producer provenance")
 	}
+	if report.Policy != config.AmbiguityManual && report.Policy != config.AmbiguityAutoBest {
+		return EvaluationCorpus{}, errors.New("capture requires a known selection policy")
+	}
 	if captureID == "" {
 		captureID = report.Track.URI
 	}
@@ -144,9 +152,11 @@ func NewEvaluationCorpus(captureID, toolVersion string, report ResolutionInspect
 		CaptureID: captureID,
 		Provenance: CaptureProvenance{
 			CapturedBy: CaptureTool{Name: "offbeat", Version: toolVersion},
+			Policy:     report.Policy,
 			Producer:   &producer,
 		},
 		Observation: &ResolutionObservation{
+			Policy:           report.Policy,
 			CapturedAt:       report.CapturedAt,
 			Track:            report.Track,
 			Query:            report.Query,
@@ -164,7 +174,11 @@ func NewEvaluationCorpus(captureID, toolVersion string, report ResolutionInspect
 // ReplayYouTubeObservation evaluates frozen results through the current
 // production selection policy. FreshSearch is false by definition.
 func ReplayYouTubeObservation(observation ResolutionObservation) ResolutionInspection {
-	report := inspectYouTubeCandidates(inspectionDesiredTrack(observation.Track), observation.Query, observation.Search.RawResults, observation.CapturedAt)
+	policy := observation.Policy
+	if policy == "" { // Format v1 captures predate policy identification; they used the conservative policy.
+		policy = config.AmbiguityManual
+	}
+	report := inspectYouTubeCandidatesWithPolicy(inspectionDesiredTrack(observation.Track), observation.Query, observation.Search.RawResults, observation.CapturedAt, policy)
 	report.FreshSearch = false
 	return report
 }
@@ -194,7 +208,19 @@ func ReplayEvaluationCorpus(corpus EvaluationCorpus) (EvaluationReport, error) {
 		Cases:         make([]EvaluationCaseResult, 0, len(corpus.Captures)),
 	}
 	for _, capture := range corpus.Captures {
-		result := EvaluationCaseResult{CaptureID: capture.CaptureID}
+		policy := capture.Provenance.Policy
+		if capture.Observation != nil {
+			policy = capture.Observation.Policy
+		}
+		if policy == "" {
+			policy = config.AmbiguityManual
+		}
+		if report.Policy == "" {
+			report.Policy = policy
+		} else if report.Policy != policy {
+			report.Policy = "mixed"
+		}
+		result := EvaluationCaseResult{CaptureID: capture.CaptureID, Policy: policy}
 		if capture.Failure != nil {
 			failure := *capture.Failure
 			result.Failure = &failure
@@ -302,10 +328,16 @@ func ValidateEvaluationCorpus(corpus EvaluationCorpus) error {
 		if (capture.Observation == nil) == (capture.Failure == nil) {
 			return fmt.Errorf("%s requires exactly one observation or failure", prefix)
 		}
+		if !validCapturePolicy(capture.Provenance.Policy) {
+			return fmt.Errorf("%s has unsupported selection_policy %q", prefix, capture.Provenance.Policy)
+		}
 		if capture.Failure != nil && capture.Failure.Stage != FailureSearch && capture.Failure.Stage != FailureRetrieval {
 			return fmt.Errorf("%s has unsupported failure stage %q", prefix, capture.Failure.Stage)
 		}
 		if capture.Observation != nil {
+			if !validCapturePolicy(capture.Observation.Policy) || (capture.Provenance.Policy != "" && capture.Provenance.Policy != capture.Observation.Policy) {
+				return fmt.Errorf("%s observation has inconsistent selection_policy", prefix)
+			}
 			producer := capture.Provenance.Producer
 			if producer == nil || strings.TrimSpace(producer.DecisionTool.Name) == "" || strings.TrimSpace(producer.DecisionTool.Version) == "" {
 				return fmt.Errorf("%s observation requires decision tool name and version", prefix)
@@ -358,4 +390,8 @@ func ValidateEvaluationCorpus(corpus EvaluationCorpus) error {
 		}
 	}
 	return nil
+}
+
+func validCapturePolicy(policy string) bool {
+	return policy == "" || policy == config.AmbiguityManual || policy == config.AmbiguityAutoBest
 }

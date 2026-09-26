@@ -107,6 +107,7 @@ func printConfig(w io.Writer, c ipc.ConfigResult) {
 	fmt.Fprintf(w, "    concurrency        : %d\n", c.Acquisition.Concurrency)
 	fmt.Fprintf(w, "    temp_retry_backoff : %s\n", c.Acquisition.TempRetryBackoff)
 	fmt.Fprintf(w, "    max_temp_retries   : %d\n", c.Acquisition.MaxTempRetries)
+	fmt.Fprintf(w, "    ambiguity_policy  : %s\n", c.Acquisition.AmbiguityPolicy)
 	fmt.Fprintln(w, "  downloader:")
 	fmt.Fprintf(w, "    yt_dlp_path  : %s\n", c.Downloader.YTDLPPath)
 	fmt.Fprintf(w, "    ffmpeg_path  : %s\n", c.Downloader.FFmpegPath)

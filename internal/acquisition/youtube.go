@@ -57,6 +57,7 @@ const (
 // ResolutionDiagnostic is the bounded persisted explanation for an
 // unresolved search. It deliberately contains aggregate counts only.
 type ResolutionDiagnostic struct {
+	Policy           string           `json:"selection_policy,omitempty"`
 	Reason           ResolutionReason `json:"reason,omitempty"`
 	Candidates       int              `json:"candidates"`
 	MetadataRejected int              `json:"metadata_rejected"`
@@ -68,7 +69,7 @@ type ResolutionDiagnostic struct {
 }
 
 func (d *ResolutionDiagnostic) Error() string {
-	return fmt.Sprintf("YouTube resolution %s: candidates=%d metadata=%d title=%d artist=%d version=%d duration=%d eligible=%d", d.Reason, d.Candidates, d.MetadataRejected, d.TitleRejected, d.ArtistRejected, d.VersionRejected, d.DurationRejected, d.Eligible)
+	return fmt.Sprintf("YouTube resolution %s (policy=%s): candidates=%d metadata=%d title=%d artist=%d version=%d duration=%d eligible=%d", d.Reason, d.Policy, d.Candidates, d.MetadataRejected, d.TitleRejected, d.ArtistRejected, d.VersionRejected, d.DurationRejected, d.Eligible)
 }
 
 func (d *ResolutionDiagnostic) Unwrap() error { return ErrUnresolved }
@@ -88,6 +89,7 @@ type Inspector interface {
 // Media retrieval remains the separate Retriever boundary.
 type YTDLPResolver struct {
 	ytdlp            string
+	policy           string
 	command          func(context.Context, string, ...string) *exec.Cmd
 	now              func() time.Time
 	toolVersionMu    sync.Mutex
@@ -95,7 +97,11 @@ type YTDLPResolver struct {
 }
 
 func NewYouTubeResolver(cfg config.Downloader) *YTDLPResolver {
-	return &YTDLPResolver{ytdlp: cfg.YTDLPPath, command: exec.CommandContext, now: time.Now}
+	return NewYouTubeResolverWithPolicy(cfg, config.AmbiguityManual)
+}
+
+func NewYouTubeResolverWithPolicy(cfg config.Downloader, policy string) *YTDLPResolver {
+	return &YTDLPResolver{ytdlp: cfg.YTDLPPath, policy: policy, command: exec.CommandContext, now: time.Now}
 }
 
 // YouTubeSearchResult contains only fields observed in yt-dlp's bounded search
@@ -160,12 +166,14 @@ type ResolutionDecision struct {
 	MarginPassed     *bool            `json:"margin_passed,omitempty"`
 	SelectedURL      string           `json:"selected_url,omitempty"`
 	UnresolvedReason ResolutionReason `json:"unresolved_reason,omitempty"`
+	SelectionReason  string           `json:"selection_reason,omitempty"`
 }
 
 // ResolutionInspection is a bounded, machine-readable report of one fresh
 // search. It is diagnostic output, never durable Acquisition state.
 type ResolutionInspection struct {
 	ReportVersion int                  `json:"report_version"`
+	Policy        string               `json:"selection_policy"`
 	FreshSearch   bool                 `json:"fresh_search"`
 	CapturedAt    time.Time            `json:"captured_at"`
 	Track         InspectionTrack      `json:"track"`
@@ -205,7 +213,7 @@ func (r *YTDLPResolver) Inspect(ctx context.Context, track desired.Track) (Resol
 	}
 	query := BuildYouTubeQuery(track)
 	if query.Text == "" || query.DurationMS <= 0 {
-		report := inspectYouTubeCandidates(track, query, nil, r.currentTime())
+		report := inspectYouTubeCandidatesWithPolicy(track, query, nil, r.currentTime(), r.policy)
 		report.Diagnostic.Reason = ResolutionMetadata
 		report.Decision.UnresolvedReason = ResolutionMetadata
 		return report, nil
@@ -233,7 +241,7 @@ func (r *YTDLPResolver) Inspect(ctx context.Context, track desired.Track) (Resol
 	if err := json.Unmarshal(output, &result); err != nil {
 		return ResolutionInspection{}, errors.New("decode YouTube search results")
 	}
-	report := inspectYouTubeCandidates(track, query, result.Entries, r.currentTime())
+	report := inspectYouTubeCandidatesWithPolicy(track, query, result.Entries, r.currentTime(), r.policy)
 	report.Producer = &InspectionProducer{SearchTool: CaptureTool{Name: "yt-dlp", Version: toolVersion}}
 	return report, nil
 }
@@ -320,6 +328,10 @@ func selectYouTubeCandidate(track desired.Track, candidates []youtubeCandidate) 
 }
 
 func inspectYouTubeCandidates(track desired.Track, query YouTubeQuery, candidates []youtubeCandidate, capturedAt time.Time) ResolutionInspection {
+	return inspectYouTubeCandidatesWithPolicy(track, query, candidates, capturedAt, config.AmbiguityManual)
+}
+
+func inspectYouTubeCandidatesWithPolicy(track desired.Track, query YouTubeQuery, candidates []youtubeCandidate, capturedAt time.Time, policy string) ResolutionInspection {
 	if len(candidates) > youtubeCandidateLimit {
 		candidates = candidates[:youtubeCandidateLimit]
 	}
@@ -329,6 +341,7 @@ func inspectYouTubeCandidates(track desired.Track, query YouTubeQuery, candidate
 	}
 	report := ResolutionInspection{
 		ReportVersion: ResolutionInspectionVersion,
+		Policy:        policy,
 		FreshSearch:   true,
 		CapturedAt:    capturedAt,
 		Track:         InspectionTrack{URI: track.URI, Title: track.Name, Artists: artists, Album: InspectionNamedURI{URI: track.Album.URI, Name: track.Album.Name}, DurationMS: track.DurationMS},
@@ -340,7 +353,7 @@ func inspectYouTubeCandidates(track desired.Track, query YouTubeQuery, candidate
 	seen := make(map[string]struct{})
 	seenIndex := make(map[string]int)
 	ranked := make([]candidateRank, 0, len(candidates))
-	diagnostic := ResolutionDiagnostic{}
+	diagnostic := ResolutionDiagnostic{Policy: policy}
 	for position, candidate := range candidates {
 		if _, ok := seen[candidate.ID]; ok {
 			index := seenIndex[candidate.ID]
@@ -429,13 +442,16 @@ func inspectYouTubeCandidates(track desired.Track, query YouTubeQuery, candidate
 		report.Decision.UnresolvedReason = diagnostic.Reason
 		return report
 	}
-	if len(ranked) > 1 && ranked[0].score-ranked[1].score < youtubeRunnerUpMargin {
+	if policy != config.AmbiguityAutoBest && len(ranked) > 1 && ranked[0].score-ranked[1].score < youtubeRunnerUpMargin {
 		diagnostic.Reason = ResolutionAmbiguous
 		report.Diagnostic = diagnostic
 		report.Decision.UnresolvedReason = diagnostic.Reason
 		return report
 	}
 	report.Decision.SelectedURL = "https://www.youtube.com/watch?v=" + ranked[0].candidate.ID
+	if policy == config.AmbiguityAutoBest {
+		report.Decision.SelectionReason = "highest eligible above floor; ties ranked by score, duration delta, then video ID; auto_best bypasses margin"
+	}
 	report.Diagnostic = diagnostic
 	return report
 }

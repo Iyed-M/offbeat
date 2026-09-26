@@ -19,6 +19,7 @@ import (
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/app"
+	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 )
 
@@ -33,6 +34,7 @@ type captureBatchOptions struct {
 
 type captureBatchSummary struct {
 	Version                       int            `json:"version"`
+	SelectionPolicies             map[string]int `json:"selection_policies"`
 	State                         string         `json:"state"`
 	Limit                         int            `json:"limit,omitempty"`
 	Attempted                     int            `json:"attempted"`
@@ -76,6 +78,11 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 	}
 
 	socket := app.SocketPath(bootstrap.SocketDir)
+	policy, err := daemonAmbiguityPolicy(ctx, socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "offbeat acquire capture-batch: read selection policy: %v\n", err)
+		return 1
+	}
 	work, err := listAcquisitionWork(ctx, socket)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "offbeat acquire capture-batch: list acquisition work: %v\n", err)
@@ -84,6 +91,7 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 	trackURIs := matchingBatchTrackURIs(work, options.State)
 	summary := captureBatchSummary{
 		Version:                       batchSummaryVersion,
+		SelectionPolicies:             map[string]int{},
 		State:                         options.State,
 		Limit:                         options.Limit,
 		DiagnosticReasons:             map[string]int{},
@@ -142,7 +150,7 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 			reason := batchInspectionFailureReason(inspectErr)
 			summary.SearchFailures++
 			summary.SearchFailureReasons[reason]++
-			failure := newBatchFailureCorpus(trackURI, reason, annotations)
+			failure := newBatchFailureCorpus(trackURI, reason, policy, annotations)
 			if err := writePrivateJSON(path, failure); err != nil {
 				fmt.Fprintf(os.Stderr, "offbeat acquire capture-batch: write %s: %v\n", filepath.Base(path), err)
 				return 1
@@ -155,7 +163,7 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 			reason := "capture_validation_error"
 			summary.SearchFailures++
 			summary.SearchFailureReasons[reason]++
-			failure := newBatchFailureCorpus(trackURI, reason, annotations)
+			failure := newBatchFailureCorpus(trackURI, reason, policy, annotations)
 			if err := writePrivateJSON(path, failure); err != nil {
 				fmt.Fprintf(os.Stderr, "offbeat acquire capture-batch: write %s: %v\n", filepath.Base(path), err)
 				return 1
@@ -174,6 +182,16 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 		addBatchDiagnostic(&summary, report)
 	}
 	if len(captures) > 0 {
+		for _, capture := range captures {
+			capturePolicy := capture.Provenance.Policy
+			if capture.Observation != nil {
+				capturePolicy = capture.Observation.Policy
+			}
+			if capturePolicy == "" {
+				capturePolicy = config.AmbiguityManual
+			}
+			summary.SelectionPolicies[capturePolicy]++
+		}
 		corpusFiles, err := writeBatchCorpora(options.OutputDir, captures)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "offbeat acquire capture-batch: write corpus: %v\n", err)
@@ -189,10 +207,35 @@ func runAcquireCaptureBatchContext(ctx context.Context, configPath, homeDir stri
 	return 0
 }
 
-func newBatchFailureCorpus(trackURI, reason string, annotations acquisition.HumanAnnotations) acquisition.EvaluationCorpus {
+func daemonAmbiguityPolicy(ctx context.Context, socket string) (string, error) {
+	resp, err := requestControlMessageContext(ctx, socket, ipc.Request{Version: ipc.ProtocolVersion, Command: "config"}, controlReadTimeout)
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != nil {
+		return "", fmt.Errorf("daemon error: %s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	if resp.Version != ipc.ProtocolVersion {
+		return "", errors.New("unexpected daemon version")
+	}
+	raw, err := ipc.Encode(resp.Result)
+	if err != nil {
+		return "", err
+	}
+	var cfg ipc.ConfigResult
+	if err := ipc.Decode(raw, &cfg); err != nil {
+		return "", err
+	}
+	if cfg.Acquisition.AmbiguityPolicy != config.AmbiguityManual && cfg.Acquisition.AmbiguityPolicy != config.AmbiguityAutoBest {
+		return "", errors.New("unexpected daemon selection policy")
+	}
+	return cfg.Acquisition.AmbiguityPolicy, nil
+}
+
+func newBatchFailureCorpus(trackURI, reason, policy string, annotations acquisition.HumanAnnotations) acquisition.EvaluationCorpus {
 	return acquisition.EvaluationCorpus{FormatVersion: acquisition.EvaluationFormatVersion, Captures: []acquisition.EvaluationCapture{{
 		CaptureID:   trackURI,
-		Provenance:  acquisition.CaptureProvenance{CapturedBy: acquisition.CaptureTool{Name: "offbeat", Version: version}},
+		Provenance:  acquisition.CaptureProvenance{CapturedBy: acquisition.CaptureTool{Name: "offbeat", Version: version}, Policy: policy},
 		Failure:     &acquisition.CapturedFailure{Stage: acquisition.FailureSearch, Message: reason},
 		Annotations: annotations,
 	}}}

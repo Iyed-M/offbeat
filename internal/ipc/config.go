@@ -52,6 +52,7 @@ type ConfigAcquisition struct {
 	Concurrency      int    `json:"concurrency"`
 	TempRetryBackoff string `json:"temp_retry_backoff"`
 	MaxTempRetries   int    `json:"max_temp_retries"`
+	AmbiguityPolicy  string `json:"ambiguity_policy"`
 }
 
 type ConfigSync struct {
