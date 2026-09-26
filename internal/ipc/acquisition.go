@@ -12,6 +12,21 @@ type ManualMappingRequest struct {
 	VideoID  string `json:"video_id,omitempty"`
 }
 
+// AcquisitionChoice confirms one candidate from an inspection of the given
+// Desired metadata. A rejected candidate requires its exact reported reason.
+type AcquisitionChoice struct {
+	TrackURI             string   `json:"track_uri"`
+	VideoID              string   `json:"video_id"`
+	ExpectedTitle        string   `json:"expected_title"`
+	ExpectedArtists      []string `json:"expected_artists"`
+	ExpectedArtistURIs   []string `json:"expected_artist_uris"`
+	ExpectedAlbum        string   `json:"expected_album"`
+	ExpectedAlbumURI     string   `json:"expected_album_uri"`
+	ExpectedDurationMS   int      `json:"expected_duration_ms"`
+	RejectionReason      string   `json:"rejection_reason,omitempty"`
+	AcknowledgeRejection string   `json:"acknowledge_rejection,omitempty"`
+}
+
 type ManualMappingListRequest struct {
 	AfterURI string `json:"after_uri"`
 }

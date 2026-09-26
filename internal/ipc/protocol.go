@@ -67,6 +67,7 @@ type Request struct {
 	AcquisitionRetry   *AcquisitionIDRequest     `json:"acquisition_retry,omitempty"`
 	ManualMapping      *ManualMappingRequest     `json:"manual_mapping,omitempty"`
 	ManualMappingList  *ManualMappingListRequest `json:"manual_mapping_list,omitempty"`
+	AcquisitionChoice  *AcquisitionChoice        `json:"acquisition_choice,omitempty"`
 }
 
 // UnmarshalJSON strictly validates the request envelope before making it
@@ -78,7 +79,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name := range fields {
-		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" && name != "manual_mapping" && name != "manual_mapping_list" {
+		if name != "version" && name != "command" && name != "missing" && name != "acquire" && name != "acquisition_inspect" && name != "acquisition_status" && name != "acquisition_list" && name != "acquisition_retry" && name != "manual_mapping" && name != "manual_mapping_list" && name != "acquisition_choice" {
 			return fmt.Errorf("unknown request field %q", name)
 		}
 	}
@@ -234,6 +235,29 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	if (parsedCommand == "acquire.mapping.set" || parsedCommand == "acquire.mapping.show" || parsedCommand == "acquire.mapping.remove") && mapping == nil {
 		return errors.New("mapping request requires manual_mapping arguments")
 	}
+	var choice *AcquisitionChoice
+	if raw, ok := fields["acquisition_choice"]; ok {
+		if parsedCommand != "acquire.select" || isJSONNull(raw) {
+			return errors.New("acquisition_choice is only valid for acquire.select")
+		}
+		var parsed AcquisitionChoice
+		if err := Decode(raw, &parsed); err != nil {
+			return err
+		}
+		if err := ValidateManualMappingTrackURI(parsed.TrackURI); err != nil {
+			return err
+		}
+		if err := ValidateYouTubeVideoID(parsed.VideoID); err != nil {
+			return err
+		}
+		if parsed.ExpectedTitle == "" || len(parsed.ExpectedArtists) == 0 || len(parsed.ExpectedArtistURIs) != len(parsed.ExpectedArtists) || parsed.ExpectedDurationMS <= 0 || (parsed.AcknowledgeRejection != "" && parsed.AcknowledgeRejection != parsed.RejectionReason) {
+			return errors.New("selection requires inspected title, artists and duration; acknowledgment must match rejection_reason")
+		}
+		choice = &parsed
+	}
+	if parsedCommand == "acquire.select" && choice == nil {
+		return errors.New("acquire.select requires acquisition_choice")
+	}
 
 	r.versionSet = true
 	r.Version = parsedVersion
@@ -246,6 +270,7 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	r.AcquisitionRetry = acquisitionRetry
 	r.ManualMapping = mapping
 	r.ManualMappingList = mappingList
+	r.AcquisitionChoice = choice
 	return nil
 }
 

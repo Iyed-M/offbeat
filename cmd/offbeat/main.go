@@ -62,6 +62,9 @@ func main() {
 		}
 		os.Exit(runMissing(configPath, homeDir))
 	case "acquire":
+		if len(rest) > 0 && rest[0] == "select" {
+			os.Exit(runAcquireSelect(configPath, homeDir, rest[1:]))
+		}
 		if len(rest) > 0 && rest[0] == "mapping" {
 			os.Exit(runAcquireMapping(configPath, homeDir, rest[1:]))
 		}
@@ -95,7 +98,7 @@ func main() {
 		if len(rest) == 2 {
 			os.Exit(runAcquire(configPath, homeDir, rest[0], rest[1]))
 		}
-		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire inspect <spotify-uri> | offbeat acquire capture <spotify-uri> | offbeat acquire capture-batch --output-dir <dir> [--state unresolved|complete] [--limit N] [--retry-failed] | offbeat acquire replay <corpus.json> | offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved | offbeat acquire mapping set/show/list/remove ...")
+		fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat acquire select <spotify-uri> <youtube-video-id> [--ack-rejection <reason>] | offbeat acquire inspect <spotify-uri> | offbeat acquire capture <spotify-uri> | offbeat acquire capture-batch --output-dir <dir> [--state unresolved|complete] [--limit N] [--retry-failed] | offbeat acquire replay <corpus.json> | offbeat acquire missing | offbeat acquire <spotify-uri> <authorized-http-url> | offbeat acquire status [id] | offbeat acquire retry <id> | offbeat acquire retry unresolved | offbeat acquire mapping set/show/list/remove ...")
 		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "offbeat: unknown command %q\n", cmd)
