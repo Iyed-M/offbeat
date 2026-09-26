@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
@@ -22,7 +23,7 @@ func TestReviewReadOnlyAndEscaped(t *testing.T) {
 		case "review.list":
 			return ipc.Response{Version: 1, Result: ipc.ReviewPage{Tracks: []ipc.ReviewTrack{{TrackURI: uri, Title: `<img src=x onerror=alert(1)>`, Artists: []string{`<script>alert(2)</script>`}, DurationMS: 123000, WorkState: "unresolved"}}}}, nil
 		case "acquire.inspect":
-			return ipc.Response{Version: 1, Result: acquisition.ResolutionInspection{ReportVersion: 1, FreshSearch: true, CapturedAt: time.Now(), Track: acquisition.InspectionTrack{URI: uri, Title: `<svg onload=alert(3)>`, Artists: []acquisition.InspectionNamedURI{{Name: `<b>evil</b>`}}, DurationMS: 123000}, Search: acquisition.InspectionSearch{RawResults: []acquisition.YouTubeSearchResult{{ID: "abcdefghijk", Title: `<script>alert(4)</script>`, Uploader: `" onmouseover="evil`, Duration: 123}, {ID: "https://bad", Title: "Rejected"}}}, Candidates: []acquisition.CandidateEvidence{{FirstSearchPosition: 1, VideoID: "abcdefghijk", Eligible: true, Score: intReview(92)}, {FirstSearchPosition: 2, RejectionReason: acquisition.ResolutionMetadata}}}}, nil
+			return ipc.Response{Version: 1, Result: acquisition.ResolutionInspection{ReportVersion: 1, FreshSearch: true, CapturedAt: time.Now(), Track: acquisition.InspectionTrack{URI: uri, Title: `<svg onload=alert(3)>`, Artists: []acquisition.InspectionNamedURI{{Name: `<b>evil</b>`, URI: "spotify:artist:abc"}}, DurationMS: 123000}, Search: acquisition.InspectionSearch{RawResults: []acquisition.YouTubeSearchResult{{ID: "abcdefghijk", Title: `<script>alert(4)</script>`, Uploader: `" onmouseover="evil`, Duration: 123}, {ID: "https://bad", Title: "Rejected"}}}, Candidates: []acquisition.CandidateEvidence{{FirstSearchPosition: 1, VideoID: "abcdefghijk", Eligible: true, Score: intReview(92)}, {FirstSearchPosition: 2, RejectionReason: acquisition.ResolutionMetadata}}}}, nil
 		}
 		t.Fatalf("mutating command: %s", req.Command)
 		return ipc.Response{}, nil
@@ -45,13 +46,122 @@ func TestReviewReadOnlyAndEscaped(t *testing.T) {
 		t.Fatalf("track: %s", track.Body.String())
 	}
 	inspect := get(base + "inspect?uri=" + url.QueryEscape(uri))
-	if inspect.Code != 200 || strings.Contains(inspect.Body.String(), `<script>alert`) || strings.Contains(inspect.Body.String(), `<svg`) || !strings.Contains(inspect.Body.String(), "score 92") || !strings.Contains(inspect.Body.String(), "metadata_mismatch") || !strings.Contains(inspect.Body.String(), "https://www.youtube.com/watch?v=abcdefghijk") || strings.Contains(inspect.Body.String(), "https://bad") {
+	if inspect.Code != 200 || strings.Contains(inspect.Body.String(), `<script>alert`) || strings.Contains(inspect.Body.String(), `<svg`) || !strings.Contains(inspect.Body.String(), "score 92") || !strings.Contains(inspect.Body.String(), "metadata_mismatch") || !strings.Contains(inspect.Body.String(), "https://www.youtube.com/watch?v=abcdefghijk") || strings.Contains(inspect.Body.String(), "https://bad") || !strings.Contains(inspect.Body.String(), `data-choice=`) || !strings.Contains(inspect.Body.String(), `expected_artist_uris`) || strings.Contains(inspect.Body.String(), `onmouseover="evil`) {
 		t.Fatalf("inspection: %d %s", inspect.Code, inspect.Body.String())
 	}
 	get(base + "track?uri=" + url.QueryEscape(uri)) // refresh
 	get(base)                                       // skip
 	if strings.Join(commands, ",") != "review.list,acquire.inspect,review.list" {
 		t.Fatalf("commands: %v", commands)
+	}
+}
+
+func TestReviewSelectionAndMappingMutations(t *testing.T) {
+	const host = "127.0.0.1:9876"
+	token := strings.Repeat("d", 64)
+	base := "/s/" + token + "/"
+	const uri = "spotify:track:abc"
+	var calls []ipc.Request
+	fake := func(_ context.Context, req ipc.Request, _ time.Duration) (ipc.Response, error) {
+		calls = append(calls, req)
+		switch req.Command {
+		case "acquire.select":
+			if req.AcquisitionChoice.VideoID != "abcdefghijk" {
+				t.Fatal("wrong selected ID")
+			}
+			if req.AcquisitionChoice.ExpectedTitle == "old" {
+				return ipc.Response{Version: 1, Error: &ipc.Error{Code: ipc.CodeFailedPrecondition, Message: "Spotify metadata changed; refresh inspection"}}, nil
+			}
+			return ipc.Response{Version: 1, Result: ipc.AcquisitionResult{ID: 3, TrackURI: uri, SourceKind: "youtube", State: "pending"}}, nil
+		case "acquire.mapping.show":
+			return ipc.Response{Version: 1, Result: ipc.ManualMappingResult{TrackURI: uri, VideoID: "abcdefghijk", Provenance: "manual", CreatedAt: "now", UpdatedAt: "now"}}, nil
+		case "acquire.mapping.list":
+			return ipc.Response{Version: 1, Result: ipc.ManualMappingPage{Mappings: []ipc.ManualMappingResult{{TrackURI: uri, VideoID: "abcdefghijk", Provenance: "manual", CreatedAt: "now", UpdatedAt: "now"}}}}, nil
+		case "acquire.mapping.remove":
+			return ipc.Response{Version: 1, Result: ipc.ManualMappingRequest{TrackURI: uri}}, nil
+		case "acquire.mapping.set":
+			return ipc.Response{Version: 1, Result: ipc.ManualMappingResult{TrackURI: uri, VideoID: req.ManualMapping.VideoID, Provenance: "manual", CreatedAt: "now", UpdatedAt: "now"}}, nil
+		}
+		t.Fatalf("unexpected command %s", req.Command)
+		return ipc.Response{}, nil
+	}
+	h := newReviewHandler(host, token, fake)
+	post := func(route, body, hostHeader, origin, header string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest("POST", "http://"+host+base+route, strings.NewReader(body))
+		r.Host = hostHeader
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Offbeat-Token", header)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	choice := ipc.AcquisitionChoice{TrackURI: uri, VideoID: "abcdefghijk", ExpectedTitle: "Song", ExpectedArtists: []string{"Singer"}, ExpectedArtistURIs: []string{"spotify:artist:abc"}, ExpectedDurationMS: 120000, RejectionReason: "metadata_mismatch", AcknowledgeRejection: "metadata_mismatch"}
+	data, _ := json.Marshal(choice)
+	for _, tc := range []struct {
+		route, body, host, origin, token string
+		code                             int
+	}{
+		{"select", string(data), host, "", token, 403},
+		{"select", string(data), host, "http://evil.test", token, 403},
+		{"select", string(data), "evil.test", "http://" + host, token, 403},
+		{"select", string(data), host, "http://" + host, "bad", 403},
+		{"select", `{"track_uri":"spotify:track:abc","video_id":"short"}`, host, "http://" + host, token, 400},
+		{"select", strings.Repeat("a", 5000), host, "http://" + host, token, 400},
+		{"mapping/set", `{"track_uri":"spotify:track:abc","video_id":"ZYXWvu_987-","expected_video_id":"abcdefghijk"}`, host, "http://evil.test", token, 403},
+		{"mapping/remove", `{"track_uri":"spotify:track:abc","expected_video_id":"abcdefghijk"}`, host, "http://" + host, "bad", 403},
+	} {
+		w := post(tc.route, tc.body, tc.host, tc.origin, tc.token)
+		if w.Code != tc.code {
+			t.Fatalf("%s: %d %s", tc.route, w.Code, w.Body.String())
+		}
+	}
+	if len(calls) != 0 {
+		t.Fatalf("unauthorized mutation reached Control: %+v", calls)
+	}
+	for _, route := range []string{"select", "mapping/set", "mapping/remove"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://"+host+base+route, nil))
+		if w.Code != 404 {
+			t.Fatalf("GET %s: %d", route, w.Code)
+		}
+	}
+	choice.AcknowledgeRejection = ""
+	data, _ = json.Marshal(choice)
+	if w := post("select", string(data), host, "http://"+host, token); w.Code != 400 {
+		t.Fatalf("rejected without acknowledgement: %d", w.Code)
+	}
+	choice.AcknowledgeRejection = choice.RejectionReason
+	choice.ExpectedTitle = "old"
+	data, _ = json.Marshal(choice)
+	if w := post("select", string(data), host, "http://"+host, token); w.Code != 409 || !strings.Contains(w.Body.String(), "refresh inspection") {
+		t.Fatalf("stale: %d %s", w.Code, w.Body.String())
+	}
+	choice.ExpectedTitle = "Song"
+	data, _ = json.Marshal(choice)
+	if w := post("select", string(data), host, "http://"+host, token); w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"pending"`) {
+		t.Fatalf("selected: %d %s", w.Code, w.Body.String())
+	}
+	for _, route := range []string{"mappings", "mapping?uri=" + url.QueryEscape(uri)} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://"+host+base+route, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", route, w.Code, w.Body.String())
+		}
+	}
+	for _, route := range []string{"mapping/set", "mapping/remove"} {
+		body := `{"track_uri":"spotify:track:abc","expected_video_id":"abcdefghijk"`
+		if route == "mapping/set" {
+			body += `,"video_id":"ZYXWvu_987-"`
+		}
+		body += `}`
+		if w := post(route, body, host, "http://"+host, token); w.Code != 200 {
+			t.Fatalf("%s: %d %s", route, w.Code, w.Body.String())
+		}
+	}
+	if len(calls) != 6 {
+		t.Fatalf("Control calls: %+v", calls)
 	}
 }
 

@@ -65,6 +65,16 @@ func TestManualMappingPrecedenceFailuresAndExplicitRecovery(t *testing.T) {
 	}
 	// Replacing a failed choice alone does not queue or erase its failure.
 	set("ZYXWvu_987-")
+	for _, command := range []string{"acquire.mapping.set", "acquire.mapping.remove"} {
+		_, staleErr := d.handleControlRequest(context.Background(), ipc.Request{Command: command, ManualMapping: &ipc.ManualMappingRequest{TrackURI: uri, VideoID: map[string]string{"acquire.mapping.set": "abcdefghijk"}[command], ExpectedVideoID: "abcdefghijk"}})
+		if staleErr == nil || !strings.Contains(staleErr.Error(), "mapping changed") {
+			t.Fatalf("%s did not reject stale mapping: %v", command, staleErr)
+		}
+		current, lookupErr := d.DB.ManualYouTubeMapping(context.Background(), uri)
+		if lookupErr != nil || current.VideoID != "ZYXWvu_987-" {
+			t.Fatalf("stale mutation changed mapping: %+v %v", current, lookupErr)
+		}
+	}
 	work, _ = d.DB.Acquisition(context.Background(), 1)
 	if work.State != db.AcquisitionFailed || work.SourceURL != "https://www.youtube.com/watch?v=abcdefghijk" {
 		t.Fatalf("replacement hijacked prior work: %#v", work)

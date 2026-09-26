@@ -10,6 +10,8 @@ import (
 type ManualMappingRequest struct {
 	TrackURI string `json:"track_uri"`
 	VideoID  string `json:"video_id,omitempty"`
+	// ExpectedVideoID guards edits made from an older mapping view.
+	ExpectedVideoID string `json:"expected_video_id,omitempty"`
 }
 
 // AcquisitionChoice confirms one candidate from an inspection of the given

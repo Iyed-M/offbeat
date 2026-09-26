@@ -217,6 +217,9 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 		} else if parsed.VideoID != "" {
 			return errors.New("video_id is only valid for mapping set")
 		}
+		if parsed.ExpectedVideoID != "" && (parsedCommand == "acquire.mapping.show" || ValidateYouTubeVideoID(parsed.ExpectedVideoID) != nil) {
+			return errors.New("expected_video_id is only valid for mapping changes and must be a valid video ID")
+		}
 		mapping = &parsed
 	}
 	var mappingList *ManualMappingListRequest

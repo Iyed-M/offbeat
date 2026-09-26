@@ -31,6 +31,18 @@ func (d *Daemon) handleManualMapping(ctx context.Context, req ipc.Request) (any,
 		if err := ipc.ValidateManualMappingTrackURI(uri); err != nil {
 			return nil, ipc.NewError(ipc.CodeInvalidRequest, err.Error())
 		}
+		if req.ManualMapping.ExpectedVideoID != "" {
+			if req.Command == "acquire.mapping.show" || ipc.ValidateYouTubeVideoID(req.ManualMapping.ExpectedVideoID) != nil {
+				return nil, ipc.NewError(ipc.CodeInvalidRequest, "invalid expected video ID")
+			}
+			current, lookupErr := d.DB.ManualYouTubeMapping(ctx, uri)
+			if errors.Is(lookupErr, sql.ErrNoRows) || (lookupErr == nil && current.VideoID != req.ManualMapping.ExpectedVideoID) {
+				return nil, ipc.NewError(ipc.CodeFailedPrecondition, "mapping changed; refresh mapping")
+			}
+			if lookupErr != nil {
+				return nil, ipc.NewError(ipc.CodeInternal, "could not read manual mapping")
+			}
+		}
 		switch req.Command {
 		case "acquire.mapping.set":
 			if err := ipc.ValidateYouTubeVideoID(req.ManualMapping.VideoID); err != nil {
