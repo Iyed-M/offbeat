@@ -37,6 +37,11 @@ go build ./cmd/offbeatd
 node --test spicetify/offbeat/offbeat.test.js
 ```
 
+## use formatting before commiting
+
+go fmt for go files
+`biome format --write spicetify/offbeat/offbeat.js spicetify/offbeat/offbeat.test.js` for js files
+
 ## Configuration
 
 Default config location:
