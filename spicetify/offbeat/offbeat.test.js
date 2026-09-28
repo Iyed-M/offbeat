@@ -5,22 +5,62 @@ var test = require("node:test");
 var createAdapter = require("./offbeat.js").createAdapter;
 var collectSnapshot = require("./offbeat.js").collectSnapshot;
 
-test("collection bounds observed fields and does not infer optional presentation data", async function () {
+test("collects only documented PlayerTrack optional shapes when present", async function () {
 	var platform = emptyPlatform();
 	var regular = supportedTrack("spotify:track:one", "One");
 	regular.artists.push({ uri: "spotify:artist:two", name: "Second" });
-	// Unknown optional source shapes are deliberately not interpreted as tags.
+	// Spicetify globals.d.ts: Album.images and TrackMetadata fields.
 	regular.album.artists = [{ name: "Unverified album artist" }];
 	regular.album.images = [{ url: "https://example.com/cover" }];
+	regular.metadata = { album_artist_name: "Album ensemble", album_track_number: "5", album_disc_number: "2" };
 	regular.trackNumber = 5;
-	var oversized = supportedTrack("spotify:track:two", "x".repeat(1025));
-	platform.LibraryAPI.getTracks = async function () {
-		return { items: [regular, oversized], totalLength: 2 };
+	var absent = supportedTrack("spotify:track:two", "Two");
+	absent.album.images = [];
+	absent.metadata = { album_artist_name: null, album_track_number: null, album_disc_number: "" };
+	platform.RootlistAPI.getContents = async function () {
+		return { items: [{ type: "playlist", uri: "spotify:playlist:one", name: "One" }] };
 	};
-	var entries = (await collectSnapshot(platform)).liked_songs.entries;
+	platform.PlaylistAPI.getContents = async function () {
+		return { items: [regular], totalLength: 1 };
+	};
+	platform.LibraryAPI.getTracks = async function () {
+		return { items: [{ item: regular }, absent], totalLength: 2 };
+	};
+	var snapshot = await collectSnapshot(platform);
+	var entries = snapshot.liked_songs.entries;
 	assert.deepEqual(entries[0].track.artists.map(function (artist) { return artist.name; }), ["Artist", "Second"]);
-	assert.deepEqual(Object.keys(entries[0].track), ["uri", "name", "artists", "album", "duration_ms"]);
-	assert.equal(entries[1].kind, "unsupported");
+	assert.deepEqual(entries[0].track, {
+		uri: "spotify:track:one", name: "One", artists: regular.artists,
+		album: { uri: regular.album.uri, name: regular.album.name }, duration_ms: 1000,
+		artwork_url: "https://example.com/cover", album_artist: "Album ensemble",
+		track_number: 5, disc_number: 2,
+	});
+	assert.deepEqual(snapshot.playlists[0].entries[0].track, entries[0].track);
+	assert.deepEqual(Object.keys(entries[1].track), ["uri", "name", "artists", "album", "duration_ms"]);
+});
+
+test("oversized or malformed presentation rejects the whole collection, never demotes a track", async function () {
+	var platform = emptyPlatform();
+	for (var mutate of [
+		function (track) { track.name = "x".repeat(1025); },
+		function (track) { track.name = "line\nfeed"; },
+		function (track) { track.album.name = "x".repeat(1025); },
+		function (track) { track.artists[0].name = "x".repeat(1025); },
+		function (track) { track.artists = Array(65).fill(track.artists[0]); },
+		function (track) { track.album.images = [{ url: "http://example.com/cover" }]; },
+		function (track) { track.metadata = { album_track_number: "-1" }; },
+	]) {
+		var regular = supportedTrack("spotify:track:one", "One");
+		mutate(regular);
+		platform.LibraryAPI.getTracks = async function () {
+			return { items: [supportedTrack("spotify:track:good", "Good"), regular], totalLength: 2 };
+		};
+		await assert.rejects(collectSnapshot(platform), /invalid track presentation metadata/);
+	}
+	platform.LibraryAPI.getTracks = async function () {
+		return { items: [{ type: "episode" }], totalLength: 1 };
+	};
+	assert.equal((await collectSnapshot(platform)).liked_songs.entries[0].kind, "unsupported");
 });
 
 function createPeer() {
@@ -519,6 +559,24 @@ test("sends one bounded collection error instead of a partial candidate", async 
 		type: "snapshot.response",
 		request_id: "failed-request",
 		error: { operation: "playlist", offset: 0, message: "request failed" },
+	});
+});
+
+test("oversized supported track sends a collection error, not an unsupported snapshot", async function () {
+	var peer = createPeer();
+	var platform = emptyPlatform();
+	platform.LibraryAPI.getTracks = async function () {
+		return { items: [supportedTrack("spotify:track:one", "x".repeat(1025))], totalLength: 1 };
+	};
+	start(peer, platform);
+	var socket = peer.sockets[0];
+	socket.open();
+	socket.receive({ version: 1, type: "hello.accepted" });
+	socket.receive({ version: 1, type: "snapshot.request", request_id: "oversized" });
+	await new Promise(function (resolve) { setImmediate(resolve); });
+	assert.deepEqual(socket.sent[1], {
+		version: 1, type: "snapshot.response", request_id: "oversized",
+		error: { operation: "liked_songs", offset: 0, message: "invalid track presentation metadata" },
 	});
 });
 

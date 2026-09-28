@@ -17,6 +17,9 @@ type stateQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+// Keep every Desired-track reader on the same projection and column order.
+const spotifyTrackColumns = `s.uri, s.name, s.artists_json, s.album_uri, s.album_name, s.duration_ms, s.album_artist, s.track_number, s.disc_number, s.release_date, s.artwork_url`
+
 // SpotifySyncSummary counts entry occurrences rather than distinct tracks.
 type SpotifySyncSummary struct {
 	PlaylistCount               int
@@ -268,7 +271,7 @@ func readDesiredSpotifyState(ctx context.Context, q stateQuerier) (desired.State
 		return desired.State{}, desired.Metadata{}, err
 	}
 
-	rows, err := q.QueryContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms, album_artist, track_number, disc_number, release_date, artwork_url FROM spotify_tracks ORDER BY uri`)
+	rows, err := q.QueryContext(ctx, `SELECT `+spotifyTrackColumns+` FROM spotify_tracks s ORDER BY s.uri`)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("query tracks: %w", err)
 	}

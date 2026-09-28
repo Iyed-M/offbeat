@@ -125,6 +125,38 @@ func TestSpotifySyncReportsCorrelatedCollectionFailure(t *testing.T) {
 	assertSyncFailure(t, syncResponse(t, <-done), "rejected during playlist at offset 100")
 }
 
+func TestSpotifySyncCollectionFailurePreservesCommittedTracks(t *testing.T) {
+	d := startAdapterDaemon(t)
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	first := sendSync(t, d)
+	requestID := assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"snapshot": map[string]any{"kind": "candidate", "playlists": []any{}, "liked_songs": map[string]any{"entries": []any{map[string]any{
+			"position": 0, "kind": "supported", "track": map[string]any{
+				"uri": "spotify:track:one", "name": "One", "artists": []any{map[string]any{"uri": "spotify:artist:one", "name": "Artist"}},
+				"album": map[string]any{"uri": "spotify:album:one", "name": "Album"}, "duration_ms": 1000,
+			},
+		}}}},
+	})
+	assertSyncSuccess(t, syncResponse(t, <-first))
+	before, metadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := sendSync(t, d)
+	requestID = assertSnapshotRequest(t, readAdapterMessage(t, adapter))
+	writeAdapterJSON(t, adapter, map[string]any{
+		"version": 1, "type": "snapshot.response", "request_id": requestID,
+		"error": map[string]any{"operation": "liked_songs", "offset": 0, "message": "invalid track presentation metadata"},
+	})
+	assertSyncFailure(t, syncResponse(t, <-second), "invalid track presentation metadata")
+	after, afterMetadata, err := d.DB.ReadDesiredSpotifyState(context.Background())
+	if err != nil || afterMetadata.Revision != metadata.Revision || len(after.LikedSongs) != 1 || after.LikedSongs[0].TrackURI != before.LikedSongs[0].TrackURI {
+		t.Fatalf("state lost on failed candidate: %#v %#v %v", after, afterMetadata, err)
+	}
+}
+
 func TestSpotifySyncRejectsConcurrentRequest(t *testing.T) {
 	d := startAdapterDaemon(t)
 	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))

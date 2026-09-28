@@ -30,6 +30,36 @@
 		);
 	}
 
+	function presentationURL(value) {
+		if (!boundedText(value, 2048) || /[ \\]/.test(value)) return false;
+		try {
+			var parsed = new global.URL(value);
+			var authority = value.slice("https://".length).split(/[/?#]/)[0];
+			return (
+				value.startsWith("https://") &&
+				!authority.includes(":") &&
+				parsed.protocol === "https:" &&
+				parsed.hostname !== "" &&
+				parsed.username === "" &&
+				parsed.password === "" &&
+				parsed.port === "" &&
+				parsed.hash === ""
+			);
+		} catch (_error) {
+			return false;
+		}
+	}
+
+	function optionalNumber(value, operation, offset) {
+		if (value == null || value === "") return null;
+		var number = typeof value === "string" && /^[0-9]+$/.test(value)
+			? Number(value)
+			: value;
+		if (!Number.isSafeInteger(number) || number < 1 || number > 9999)
+			throw collectionError(operation, offset, "invalid track presentation metadata");
+		return number;
+	}
+
 	function page(response, operation, offset, onZeroPageOffset) {
 		if (
 			!object(response) ||
@@ -86,40 +116,66 @@
 		if (!Number.isSafeInteger(durationMS) && object(source.duration))
 			durationMS = source.duration.milliseconds;
 		if (
-			!boundedText(source.uri, 512) ||
-			!boundedText(source.name, 1024) ||
+			!requiredString(source.uri) ||
+			!requiredString(source.name) ||
 			!Number.isSafeInteger(durationMS) ||
 			durationMS <= 0 ||
-			durationMS > 24 * 60 * 60 * 1000 ||
 			!Array.isArray(source.artists) ||
 			source.artists.length === 0 ||
-			source.artists.length > 64 ||
 			!object(source.album)
 		)
 			return unsupported;
+		if (
+			!boundedText(source.uri, 512) ||
+			!boundedText(source.name, 1024) ||
+			durationMS > 24 * 60 * 60 * 1000 ||
+			source.artists.length > 64
+		)
+			throw collectionError(operation, offset, "invalid track presentation metadata");
 		var artists = [];
 		for (var index = 0; index < source.artists.length; index += 1) {
 			var artist = source.artists[index];
-			if (
-				!object(artist) ||
-				!boundedText(artist.uri, 512) ||
-				!boundedText(artist.name, 1024)
-			)
+			if (!object(artist) || !requiredString(artist.uri) || !requiredString(artist.name))
 				return unsupported;
+			if (!boundedText(artist.uri, 512) || !boundedText(artist.name, 1024))
+				throw collectionError(operation, offset, "invalid track presentation metadata");
 			artists.push({ uri: artist.uri, name: artist.name });
 		}
-		if (!boundedText(source.album.uri, 512) || !boundedText(source.album.name, 1024))
+		if (!requiredString(source.album.uri) || !requiredString(source.album.name))
 			return unsupported;
+		if (!boundedText(source.album.uri, 512) || !boundedText(source.album.name, 1024))
+			throw collectionError(operation, offset, "invalid track presentation metadata");
+		var track = {
+			uri: source.uri,
+			name: source.name,
+			artists: artists,
+			album: { uri: source.album.uri, name: source.album.name },
+			duration_ms: durationMS,
+		};
+		// These shapes are documented for Spicetify PlayerTrack, but their
+		// availability on PlaylistAPI/LibraryAPI items varies by Desktop build.
+		if (Array.isArray(source.album.images) && source.album.images.length > 0) {
+			var image = source.album.images[0];
+			if (!object(image) || !presentationURL(image.url))
+				throw collectionError(operation, offset, "invalid track presentation metadata");
+			track.artwork_url = image.url;
+		}
+		if (object(source.metadata)) {
+			var metadata = source.metadata;
+			if (metadata.album_artist_name != null && metadata.album_artist_name !== "") {
+				if (!boundedText(metadata.album_artist_name, 1024))
+					throw collectionError(operation, offset, "invalid track presentation metadata");
+				track.album_artist = metadata.album_artist_name;
+			}
+			var number = optionalNumber(metadata.album_track_number, operation, offset);
+			if (number !== null) track.track_number = number;
+			number = optionalNumber(metadata.album_disc_number, operation, offset);
+			if (number !== null) track.disc_number = number;
+		}
 		return {
 			position: position,
 			kind: "supported",
-			track: {
-				uri: source.uri,
-				name: source.name,
-				artists: artists,
-				album: { uri: source.album.uri, name: source.album.name },
-				duration_ms: durationMS,
-			},
+			track: track,
 		};
 	}
 
