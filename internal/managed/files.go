@@ -320,6 +320,28 @@ func (f *Files) Available(uri, path string) bool {
 // staged file is intentionally accepted as an open descriptor: callers cannot
 // direct a managed write with an arbitrary source pathname.
 func (f *Files) Publish(uri string, source *os.File, extension string) (string, error) {
+	return f.publish(context.Background(), uri, source, extension, false)
+}
+
+// PublishNew refuses to replace a preexisting track (including an orphan from
+// an interrupted database commit). The boolean says an existing file was
+// adopted, so callers do not mistake this attempt's tags for its actual tags.
+func (f *Files) PublishNew(ctx context.Context, uri string, source *os.File, extension string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	final := TrackPath(uri, extension)
+	if f.Available(uri, final) {
+		return final, true, nil
+	}
+	path, err := f.publish(ctx, uri, source, extension, true)
+	return path, false, err
+}
+
+func (f *Files) publish(ctx context.Context, uri string, source *os.File, extension string, newOnly bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if uri == "" {
 		return "", fmt.Errorf("empty track URI")
 	}
@@ -343,13 +365,25 @@ func (f *Files) Publish(uri string, source *os.File, extension string) (string, 
 		return "", fmt.Errorf("rewind staged media: %w", err)
 	}
 	final := TrackPath(uri, extension)
+	if newOnly {
+		if _, err := f.root.Lstat(final); err == nil {
+			// A file appeared since PublishNew checked for an orphan.
+			// Never replace it, even if it is currently unreadable.
+			return "", fmt.Errorf("managed track already exists but is unavailable")
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("inspect managed track: %w", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	temp := "tracks/.publish-" + rand.Text()
 	destination, err := f.root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return "", err
 	}
 	defer f.root.Remove(temp)
-	if _, err := io.Copy(destination, source); err != nil {
+	if _, err := io.Copy(destination, &contextReader{ctx: ctx, source: source}); err != nil {
 		_ = destination.Close()
 		return "", fmt.Errorf("copy staged media: %w", err)
 	}
@@ -360,10 +394,45 @@ func (f *Files) Publish(uri string, source *os.File, extension string) (string, 
 	if err := destination.Close(); err != nil {
 		return "", err
 	}
-	if err := f.root.Rename(temp, final); err != nil {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if newOnly {
+		// An atomic hard link installs only if the destination is absent.
+		// Rename would replace a good track in a race with an outside writer.
+		if err := f.root.Link(temp, final); err != nil {
+			return "", err
+		}
+		// Persist the directory entry before the DB points at it. If sync
+		// fails, the complete file can be adopted on the next attempt.
+		dir, err := f.root.Open("tracks")
+		if err != nil {
+			return "", err
+		}
+		syncErr := dir.Sync()
+		closeErr := dir.Close()
+		if syncErr != nil {
+			return "", syncErr
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+	} else if err := f.root.Rename(temp, final); err != nil {
 		return "", err
 	}
 	return final, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	source io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.source.Read(p)
 }
 
 // PublishSynthetic writes a short PCM WAV silence fixture. It never reads an

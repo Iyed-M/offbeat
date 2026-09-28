@@ -58,7 +58,7 @@ func TestMigrateRunsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
-	if !reflect.DeepEqual(first, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
+	if !reflect.DeepEqual(first, []int{1, 2, 3, 4, 5, 6, 7, 8, 9}) {
 		t.Fatalf("first applied=%v", first)
 	}
 	second, err := d.Migrate(ctx, nil, "")

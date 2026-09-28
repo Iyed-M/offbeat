@@ -875,6 +875,10 @@ func TestAcquisitionCommitFailureStaysMissingAndCanRetry(t *testing.T) {
 	}
 	acquireControl(t, d, ipc.Request{Command: "acquire.retry", AcquisitionRetry: &ipc.AcquisitionIDRequest{ID: work.ID}})
 	waitAcquisition(t, d, work.ID, "complete")
+	var tagState string
+	if err := d.DB.QueryRowContext(context.Background(), `SELECT tag_state FROM managed_tracks WHERE track_uri = ?`, "spotify:track:one").Scan(&tagState); err != nil || tagState != "pending" {
+		t.Fatalf("adopted audio tag state = %q, %v", tagState, err)
+	}
 	for _, req := range []ipc.Request{
 		{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:one", SourceURL: "https://fixture.test/audio"}},
 		{Command: "acquire", Acquire: &ipc.AcquireRequest{TrackURI: "spotify:track:absent", SourceURL: "https://fixture.test/audio"}},

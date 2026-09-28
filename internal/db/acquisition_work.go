@@ -432,8 +432,17 @@ func (d *DB) UnresolveAcquisition(ctx context.Context, id int64, message string)
 // CompleteAcquisition atomically records both the managed-track mapping and
 // terminal work state. The track must still be currently desired.
 func (d *DB) CompleteAcquisition(ctx context.Context, id int64, relativePath string) error {
+	return d.CompleteTaggedAcquisition(ctx, id, relativePath, "pending", "")
+}
+
+// CompleteTaggedAcquisition commits audio availability and its independent
+// text-tag outcome together; no tag failure can turn available audio missing.
+func (d *DB) CompleteTaggedAcquisition(ctx context.Context, id int64, relativePath, tagState, tagError string) error {
 	if relativePath == "" {
 		return fmt.Errorf("%w: managed relative path is required", ErrAcquisitionPrecondition)
+	}
+	if (tagState != "pending" && tagState != "tagged" && tagState != "unsupported" && tagState != "failed") || len(tagError) > 128 {
+		return fmt.Errorf("%w: invalid tag outcome", ErrAcquisitionPrecondition)
 	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -455,7 +464,7 @@ func (d *DB) CompleteAcquisition(ctx context.Context, id int64, relativePath str
 	if err := requireDesiredTrack(ctx, tx, work.TrackURI); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path) SELECT uri, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path`, relativePath, work.TrackURI)
+	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error) SELECT uri, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error`, relativePath, tagState, tagError, work.TrackURI)
 	if err != nil {
 		return fmt.Errorf("register acquired managed track: %w", err)
 	}

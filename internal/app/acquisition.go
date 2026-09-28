@@ -11,6 +11,7 @@ import (
 	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
+	"github.com/Iyed-M/offbeat/internal/tagging"
 )
 
 func acquisitionResult(work db.AcquisitionWork) ipc.AcquisitionResult {
@@ -371,12 +372,31 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		fail("track is no longer desired or missing")
 		return
 	}
-	path, err := d.managedFiles.Publish(work.TrackURI, media.File, media.Extension)
+	track, err := d.DB.DesiredTrack(ctx, work.TrackURI)
+	if err != nil {
+		fail("could not read Spotify metadata")
+		return
+	}
+	tags := tagging.Stage(ctx, media.File, media.Extension, track, d.Cfg.Downloader.FFmpegPath, d.Cfg.Downloader.FFprobePath)
+	defer tags.Close()
+	if ctx.Err() != nil {
+		return
+	}
+	source := media.File
+	if tags.File != nil {
+		source = tags.File
+	}
+	path, adopted, err := d.managedFiles.PublishNew(ctx, work.TrackURI, source, media.Extension)
 	if err != nil {
 		fail("could not publish managed audio")
 		return
 	}
-	if err := d.DB.CompleteAcquisition(ctx, work.ID, path); err != nil {
+	// An earlier publish can survive a failed DB commit. Its tag outcome is
+	// unknown; adopting it must not claim this attempt's staged tags landed.
+	if adopted {
+		tags.State, tags.Error = "pending", ""
+	}
+	if err := d.DB.CompleteTaggedAcquisition(ctx, work.ID, path, tags.State, tags.Error); err != nil {
 		fail("could not commit managed audio; retry acquisition")
 		return
 	}

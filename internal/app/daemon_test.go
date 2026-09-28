@@ -405,8 +405,8 @@ func TestStatusCommandReportsDaemonIdentity(t *testing.T) {
 	if !status.DBReady {
 		t.Error("DBReady=false want true")
 	}
-	if status.SchemaVersion != 8 {
-		t.Errorf("SchemaVersion=%d want 8", status.SchemaVersion)
+	if status.SchemaVersion != 9 {
+		t.Errorf("SchemaVersion=%d want 9", status.SchemaVersion)
 	}
 	if status.StartedAt.IsZero() {
 		t.Error("StartedAt is zero")
