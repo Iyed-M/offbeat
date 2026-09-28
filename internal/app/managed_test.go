@@ -47,8 +47,12 @@ func TestMissingContinuationValidationAndStateChange(t *testing.T) {
 
 func TestMissingOversizedMetadataReturnsStructuredError(t *testing.T) {
 	d := startAdapterDaemon(t)
-	track := desired.Track{URI: "spotify:track:one", Name: strings.Repeat("x", ipc.MaxMessageBytes), Artists: []desired.NamedURI{{URI: "artist", Name: "Artist"}}, Album: desired.NamedURI{URI: "album", Name: "Album"}, DurationMS: 1000}
+	track := desired.Track{URI: "spotify:track:one", Name: "One", Artists: []desired.NamedURI{{URI: "artist", Name: "Artist"}}, Album: desired.NamedURI{URI: "album", Name: "Album"}, DurationMS: 1000}
 	if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), desired.Candidate{LikedSongs: []desired.CandidateEntry{{Kind: desired.EntrySupported, Track: &track}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a legacy or externally corrupted row; new ingestion bounds metadata.
+	if _, err := d.DB.ExecContext(context.Background(), `UPDATE spotify_tracks SET name = ? WHERE uri = ?`, strings.Repeat("x", ipc.MaxMessageBytes), track.URI); err != nil {
 		t.Fatal(err)
 	}
 	response := sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"missing"}`+"\n"))

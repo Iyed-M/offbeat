@@ -80,7 +80,7 @@ func TestReviewLifecycleAcrossCLIHTTPAndRestart(t *testing.T) {
 	}()
 	entries := make([]desired.CandidateEntry, 105)
 	for i := range entries {
-		track := desired.Track{URI: fmt.Sprintf("spotify:track:%03d", i), Name: "Song", Artists: []desired.NamedURI{{URI: "spotify:artist:test", Name: "Artist"}}, DurationMS: 1000}
+		track := desired.Track{URI: fmt.Sprintf("spotify:track:%03d", i), Name: "Song", Artists: []desired.NamedURI{{URI: "spotify:artist:test", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:test", Name: "Album"}, DurationMS: 1000}
 		entries[i] = desired.CandidateEntry{Position: i, Kind: desired.EntrySupported, Track: &track}
 	}
 	if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), desired.Candidate{LikedSongs: entries}); err != nil {

@@ -174,7 +174,7 @@ func TestCLIMissingLargeLibrary(t *testing.T) {
 	want.WriteString("Missing tracks: 600 (128 available of 728 desired).\n")
 	for i := 0; i < 728; i++ {
 		// Large display metadata forces byte-budget pagination before 128 tracks.
-		track := desired.Track{URI: fmt.Sprintf("spotify:track:%04d", i), Name: strings.Repeat("title", 1200), Artists: []desired.NamedURI{{URI: "artist", Name: "Artist"}}, Album: desired.NamedURI{URI: "album", Name: "Album"}, DurationMS: 1000}
+		track := desired.Track{URI: fmt.Sprintf("spotify:track:%04d", i), Name: strings.Repeat("title", 200), Artists: []desired.NamedURI{{URI: "artist", Name: "Artist"}}, Album: desired.NamedURI{URI: "album", Name: "Album"}, DurationMS: 1000}
 		candidate.LikedSongs = append(candidate.LikedSongs, desired.CandidateEntry{Position: i, Kind: desired.EntrySupported, Track: &track})
 		if i >= 128 {
 			fmt.Fprintf(&want, "%s\t%s\tArtist\n", track.URI, track.Name)

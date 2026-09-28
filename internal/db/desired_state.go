@@ -45,6 +45,11 @@ func (d *DB) ApplyDesiredSpotifyState(ctx context.Context, candidate desired.Can
 		return desired.Metadata{}, SpotifySyncSummary{}, false, fmt.Errorf("read current desired state: %w", err)
 	}
 	want := stateFromCandidate(candidate)
+	for _, track := range want.Tracks {
+		if err := desired.ValidateTrack(track); err != nil {
+			return desired.Metadata{}, SpotifySyncSummary{}, false, fmt.Errorf("validate track: %w", err)
+		}
+	}
 	summary := summarizeCandidate(candidate)
 	if metadata.Revision != 0 && reflect.DeepEqual(current, want) {
 		if err := tx.Commit(); err != nil {
@@ -131,11 +136,18 @@ func upsertTracks(ctx context.Context, tx *sql.Tx, current, wanted []desired.Tra
 		if err != nil {
 			return fmt.Errorf("encode track artists: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO spotify_tracks(uri, name, artists_json, album_uri, album_name, duration_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(uri) DO UPDATE SET name = excluded.name, artists_json = excluded.artists_json, album_uri = excluded.album_uri, album_name = excluded.album_name, duration_ms = excluded.duration_ms`, track.URI, track.Name, string(artists), track.Album.URI, track.Album.Name, track.DurationMS); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO spotify_tracks(uri, name, artists_json, album_uri, album_name, duration_ms, album_artist, track_number, disc_number, release_date, artwork_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(uri) DO UPDATE SET name = excluded.name, artists_json = excluded.artists_json, album_uri = excluded.album_uri, album_name = excluded.album_name, duration_ms = excluded.duration_ms, album_artist = excluded.album_artist, track_number = excluded.track_number, disc_number = excluded.disc_number, release_date = excluded.release_date, artwork_url = excluded.artwork_url`, track.URI, track.Name, string(artists), track.Album.URI, track.Album.Name, track.DurationMS, optionalString(track.AlbumArtist), track.TrackNumber, track.DiscNumber, optionalString(track.ReleaseDate), optionalString(track.ArtworkURL)); err != nil {
 			return fmt.Errorf("upsert supported track: %w", err)
 		}
 	}
 	return nil
+}
+
+func optionalString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func reconcilePlaylists(ctx context.Context, tx *sql.Tx, current []desired.Playlist, wanted []desired.CandidatePlaylist) error {
@@ -256,7 +268,7 @@ func readDesiredSpotifyState(ctx context.Context, q stateQuerier) (desired.State
 		return desired.State{}, desired.Metadata{}, err
 	}
 
-	rows, err := q.QueryContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms FROM spotify_tracks ORDER BY uri`)
+	rows, err := q.QueryContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms, album_artist, track_number, disc_number, release_date, artwork_url FROM spotify_tracks ORDER BY uri`)
 	if err != nil {
 		return desired.State{}, desired.Metadata{}, fmt.Errorf("query tracks: %w", err)
 	}
@@ -264,9 +276,12 @@ func readDesiredSpotifyState(ctx context.Context, q stateQuerier) (desired.State
 	for rows.Next() {
 		var track desired.Track
 		var artistsJSON string
-		if err := rows.Scan(&track.URI, &track.Name, &artistsJSON, &track.Album.URI, &track.Album.Name, &track.DurationMS); err != nil {
+		var albumArtist, releaseDate, artworkURL sql.NullString
+		var trackNumber, discNumber sql.NullInt64
+		if err := rows.Scan(&track.URI, &track.Name, &artistsJSON, &track.Album.URI, &track.Album.Name, &track.DurationMS, &albumArtist, &trackNumber, &discNumber, &releaseDate, &artworkURL); err != nil {
 			return desired.State{}, desired.Metadata{}, fmt.Errorf("scan track: %w", err)
 		}
+		setPresentation(&track, albumArtist, trackNumber, discNumber, releaseDate, artworkURL)
 		if err := json.Unmarshal([]byte(artistsJSON), &track.Artists); err != nil {
 			return desired.State{}, desired.Metadata{}, fmt.Errorf("decode artists for %q: %w", track.URI, err)
 		}

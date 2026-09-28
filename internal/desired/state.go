@@ -16,11 +16,16 @@ type NamedURI struct {
 }
 
 type Track struct {
-	URI        string
-	Name       string
-	Artists    []NamedURI
-	Album      NamedURI
-	DurationMS int
+	URI         string
+	Name        string
+	Artists     []NamedURI
+	Album       NamedURI
+	DurationMS  int
+	AlbumArtist string
+	TrackNumber *int
+	DiscNumber  *int
+	ReleaseDate string
+	ArtworkURL  string
 }
 
 // Candidate is the complete, validated observation supplied by the Adapter.

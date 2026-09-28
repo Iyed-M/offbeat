@@ -92,7 +92,7 @@ func TestCLIStatusAgainstRunningDaemon(t *testing.T) {
 		"pid           :",
 		"started_at    :",
 		"database      : ready",
-		"schema version 7",
+		"schema version 8",
 		"Spotify adapter: disconnected",
 		"socket        :",
 	} {

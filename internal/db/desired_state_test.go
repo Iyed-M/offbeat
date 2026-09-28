@@ -240,6 +240,147 @@ func TestDesiredSpotifyStateSurvivesDatabaseReopen(t *testing.T) {
 	}
 }
 
+func TestPresentationMetadataRevisionAndRollback(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "presentation.db")
+	d, err := OpenFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Migrate(ctx, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	candidate, _ := desiredCandidateFixture()
+	track := candidate.Playlists[0].Entries[0].Track
+	if _, _, changed, err := d.ApplyDesiredSpotifyState(ctx, candidate); err != nil || !changed {
+		t.Fatalf("initial apply: %v %v", changed, err)
+	}
+	if err := d.RegisterManagedTrack(ctx, track.URI, "tracks/stable.opus"); err != nil {
+		t.Fatal(err)
+	}
+	n := 2
+	track.AlbumArtist = "Different from first artist"
+	track.TrackNumber = &n
+	track.ReleaseDate = "2024-02"
+	track.ArtworkURL = "https://i.scdn.co/image/a"
+	// Same URI appears only once in the fixture; occurrences remain unchanged.
+	meta, _, changed, err := d.ApplyDesiredSpotifyState(ctx, candidate)
+	if err != nil || !changed || meta.Revision != 2 {
+		t.Fatalf("metadata apply: %#v %v %v", meta, changed, err)
+	}
+	state, _, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil || !reflect.DeepEqual(state, stateFromCandidate(candidate)) {
+		t.Fatalf("round trip: %#v %v", state, err)
+	}
+	individual, err := d.DesiredTrack(ctx, track.URI)
+	if err != nil || !reflect.DeepEqual(individual, *track) {
+		t.Fatalf("individual track: %#v %v", individual, err)
+	}
+	managed, err := d.DesiredManagedTracks(ctx)
+	if err != nil || len(managed) != 2 || managed[1].RelativePath != "tracks/stable.opus" || !reflect.DeepEqual(managed[1].Track, *track) {
+		t.Fatalf("managed track: %#v %v", managed, err)
+	}
+	meta, _, changed, err = d.ApplyDesiredSpotifyState(ctx, candidate)
+	if err != nil || changed || meta.Revision != 2 {
+		t.Fatalf("no-op: %#v %v %v", meta, changed, err)
+	}
+	if _, err := d.ExecContext(ctx, `CREATE TRIGGER fail_presentation BEFORE UPDATE ON spotify_tracks BEGIN SELECT RAISE(ABORT, 'forced failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	track.ArtworkURL = "https://i.scdn.co/image/b"
+	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, candidate); err == nil {
+		t.Fatal("expected rollback")
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = OpenFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	state, meta, err = d.ReadDesiredSpotifyState(ctx)
+	if err != nil || meta.Revision != 2 || state.Tracks[1].ArtworkURL != "https://i.scdn.co/image/a" {
+		t.Fatalf("restart/rollback: %#v %#v %v", state, meta, err)
+	}
+	managed, err = d.DesiredManagedTracks(ctx)
+	if err != nil || len(managed) != 2 || managed[1].RelativePath != "tracks/stable.opus" {
+		t.Fatalf("reopened mapping: %#v %v", managed, err)
+	}
+}
+
+func TestPresentationMigrationPreservesLegacyStateAndNoOp(t *testing.T) {
+	ctx := context.Background()
+	d := newTestDB(t)
+	if _, err := d.ExecContext(ctx, MigrationsTableSchema); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := LoadMigrations(nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:7] {
+		if err := d.applyOne(ctx, migration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	candidate, _ := desiredCandidateFixture()
+	for _, playlist := range candidate.Playlists {
+		if _, err := d.ExecContext(ctx, `INSERT INTO playlists(uri, name, position) VALUES (?, ?, ?)`, playlist.URI, playlist.Name, playlist.Position); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range playlist.Entries {
+			if entry.Kind == desired.EntrySupported {
+				insertTrackIfAbsent(t, d, *entry.Track)
+			}
+			var uri any
+			if entry.Track != nil {
+				uri = entry.Track.URI
+			}
+			if _, err := d.ExecContext(ctx, `INSERT INTO playlist_entries(playlist_uri, position, kind, track_uri, source_uri) VALUES (?, ?, ?, ?, ?)`, playlist.URI, entry.Position, entry.Kind, uri, optionalString(entry.SourceURI)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, entry := range candidate.LikedSongs {
+		if entry.Kind == desired.EntrySupported {
+			insertTrackIfAbsent(t, d, *entry.Track)
+		}
+		var uri any
+		if entry.Track != nil {
+			uri = entry.Track.URI
+		}
+		if _, err := d.ExecContext(ctx, `INSERT INTO liked_entries(position, kind, track_uri, source_uri) VALUES (?, ?, ?, ?)`, entry.Position, entry.Kind, uri, optionalString(entry.SourceURI)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.ExecContext(ctx, `UPDATE state_metadata SET revision = 3 WHERE singleton_id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{8}) {
+		t.Fatalf("migration: %v %v", applied, err)
+	}
+	state, _, err := d.ReadDesiredSpotifyState(ctx)
+	if err != nil || !reflect.DeepEqual(state, stateFromCandidate(candidate)) {
+		t.Fatalf("migrated state: %#v %v", state, err)
+	}
+	meta, _, changed, err := d.ApplyDesiredSpotifyState(ctx, candidate)
+	if err != nil || changed || meta.Revision != 3 {
+		t.Fatalf("legacy no-op: %#v %v %v", meta, changed, err)
+	}
+}
+
+func insertTrackIfAbsent(t *testing.T, d *DB, track desired.Track) {
+	t.Helper()
+	var count int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM spotify_tracks WHERE uri = ?`, track.URI).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 {
+		insertTrack(t, d, track)
+	}
+}
+
 func desiredCandidateFixture() (desired.Candidate, desired.State) {
 	trackOne := desired.Track{URI: "spotify:track:one", Name: "One", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist One"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album One"}, DurationMS: 1000}
 	trackTwo := desired.Track{URI: "spotify:track:two", Name: "Two", Artists: []desired.NamedURI{{URI: "spotify:artist:two", Name: "Artist Two"}}, Album: desired.NamedURI{URI: "spotify:album:two", Name: "Album Two"}, DurationMS: 2000}

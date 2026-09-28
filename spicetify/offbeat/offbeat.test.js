@@ -3,6 +3,25 @@
 var assert = require("node:assert/strict");
 var test = require("node:test");
 var createAdapter = require("./offbeat.js").createAdapter;
+var collectSnapshot = require("./offbeat.js").collectSnapshot;
+
+test("collection bounds observed fields and does not infer optional presentation data", async function () {
+	var platform = emptyPlatform();
+	var regular = supportedTrack("spotify:track:one", "One");
+	regular.artists.push({ uri: "spotify:artist:two", name: "Second" });
+	// Unknown optional source shapes are deliberately not interpreted as tags.
+	regular.album.artists = [{ name: "Unverified album artist" }];
+	regular.album.images = [{ url: "https://example.com/cover" }];
+	regular.trackNumber = 5;
+	var oversized = supportedTrack("spotify:track:two", "x".repeat(1025));
+	platform.LibraryAPI.getTracks = async function () {
+		return { items: [regular, oversized], totalLength: 2 };
+	};
+	var entries = (await collectSnapshot(platform)).liked_songs.entries;
+	assert.deepEqual(entries[0].track.artists.map(function (artist) { return artist.name; }), ["Artist", "Second"]);
+	assert.deepEqual(Object.keys(entries[0].track), ["uri", "name", "artists", "album", "duration_ms"]);
+	assert.equal(entries[1].kind, "unsupported");
+});
 
 function createPeer() {
 	var sockets = [];

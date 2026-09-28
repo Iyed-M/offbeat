@@ -22,6 +22,14 @@
 		return typeof value === "string" && value !== "";
 	}
 
+	function boundedText(value, max) {
+		return (
+			requiredString(value) &&
+			new global.TextEncoder().encode(value).length <= max &&
+			!/[\x00-\x1f\x7f]/.test(value)
+		);
+	}
+
 	function page(response, operation, offset, onZeroPageOffset) {
 		if (
 			!object(response) ||
@@ -78,12 +86,14 @@
 		if (!Number.isSafeInteger(durationMS) && object(source.duration))
 			durationMS = source.duration.milliseconds;
 		if (
-			!requiredString(source.uri) ||
-			!requiredString(source.name) ||
+			!boundedText(source.uri, 512) ||
+			!boundedText(source.name, 1024) ||
 			!Number.isSafeInteger(durationMS) ||
 			durationMS <= 0 ||
+			durationMS > 24 * 60 * 60 * 1000 ||
 			!Array.isArray(source.artists) ||
 			source.artists.length === 0 ||
+			source.artists.length > 64 ||
 			!object(source.album)
 		)
 			return unsupported;
@@ -92,13 +102,13 @@
 			var artist = source.artists[index];
 			if (
 				!object(artist) ||
-				!requiredString(artist.uri) ||
-				!requiredString(artist.name)
+				!boundedText(artist.uri, 512) ||
+				!boundedText(artist.name, 1024)
 			)
 				return unsupported;
 			artists.push({ uri: artist.uri, name: artist.name });
 		}
-		if (!requiredString(source.album.uri) || !requiredString(source.album.name))
+		if (!boundedText(source.album.uri, 512) || !boundedText(source.album.name, 1024))
 			return unsupported;
 		return {
 			position: position,

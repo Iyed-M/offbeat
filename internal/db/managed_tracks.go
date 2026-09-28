@@ -44,7 +44,7 @@ func (d *DB) DesiredManagedTrackPage(ctx context.Context, after string, limit in
 }
 
 func readManagedTracks(ctx context.Context, q stateQuerier, after string, limit int) ([]ManagedTrack, error) {
-	rows, err := q.QueryContext(ctx, `SELECT s.uri, s.name, s.artists_json, s.album_uri, s.album_name, s.duration_ms, COALESCE(m.relative_path, '') FROM spotify_tracks s LEFT JOIN managed_tracks m ON m.track_uri = s.uri WHERE s.uri > ? ORDER BY s.uri LIMIT ?`, after, limit)
+	rows, err := q.QueryContext(ctx, `SELECT s.uri, s.name, s.artists_json, s.album_uri, s.album_name, s.duration_ms, s.album_artist, s.track_number, s.disc_number, s.release_date, s.artwork_url, COALESCE(m.relative_path, '') FROM spotify_tracks s LEFT JOIN managed_tracks m ON m.track_uri = s.uri WHERE s.uri > ? ORDER BY s.uri LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query desired managed tracks: %w", err)
 	}
@@ -53,9 +53,12 @@ func readManagedTracks(ctx context.Context, q stateQuerier, after string, limit 
 	for rows.Next() {
 		var item ManagedTrack
 		var artists string
-		if err := rows.Scan(&item.Track.URI, &item.Track.Name, &artists, &item.Track.Album.URI, &item.Track.Album.Name, &item.Track.DurationMS, &item.RelativePath); err != nil {
+		var albumArtist, releaseDate, artworkURL sql.NullString
+		var trackNumber, discNumber sql.NullInt64
+		if err := rows.Scan(&item.Track.URI, &item.Track.Name, &artists, &item.Track.Album.URI, &item.Track.Album.Name, &item.Track.DurationMS, &albumArtist, &trackNumber, &discNumber, &releaseDate, &artworkURL, &item.RelativePath); err != nil {
 			return nil, err
 		}
+		setPresentation(&item.Track, albumArtist, trackNumber, discNumber, releaseDate, artworkURL)
 		if err := json.Unmarshal([]byte(artists), &item.Track.Artists); err != nil {
 			return nil, err
 		}
@@ -74,15 +77,30 @@ func (d *DB) IsDesiredTrack(ctx context.Context, uri string) (bool, error) {
 func (d *DB) DesiredTrack(ctx context.Context, uri string) (desired.Track, error) {
 	var track desired.Track
 	var artists string
-	err := d.QueryRowContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms FROM spotify_tracks WHERE uri = ?`, uri).Scan(
-		&track.URI, &track.Name, &artists, &track.Album.URI, &track.Album.Name, &track.DurationMS)
+	var albumArtist, releaseDate, artworkURL sql.NullString
+	var trackNumber, discNumber sql.NullInt64
+	err := d.QueryRowContext(ctx, `SELECT uri, name, artists_json, album_uri, album_name, duration_ms, album_artist, track_number, disc_number, release_date, artwork_url FROM spotify_tracks WHERE uri = ?`, uri).Scan(
+		&track.URI, &track.Name, &artists, &track.Album.URI, &track.Album.Name, &track.DurationMS, &albumArtist, &trackNumber, &discNumber, &releaseDate, &artworkURL)
 	if err != nil {
 		return desired.Track{}, err
 	}
 	if err := json.Unmarshal([]byte(artists), &track.Artists); err != nil {
 		return desired.Track{}, err
 	}
+	setPresentation(&track, albumArtist, trackNumber, discNumber, releaseDate, artworkURL)
 	return track, nil
+}
+
+func setPresentation(track *desired.Track, albumArtist sql.NullString, trackNumber, discNumber sql.NullInt64, releaseDate, artworkURL sql.NullString) {
+	track.AlbumArtist, track.ReleaseDate, track.ArtworkURL = albumArtist.String, releaseDate.String, artworkURL.String
+	if trackNumber.Valid {
+		n := int(trackNumber.Int64)
+		track.TrackNumber = &n
+	}
+	if discNumber.Valid {
+		n := int(discNumber.Int64)
+		track.DiscNumber = &n
+	}
 }
 
 // RegisterManagedTrack retains at most one file per Spotify identity. It does

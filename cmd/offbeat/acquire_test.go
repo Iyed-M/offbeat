@@ -403,11 +403,11 @@ func TestCLIAcquireCaptureBatchPaginatesDeduplicatesAndAuditsCompletedYouTubeWor
 	defer stop()
 	tracks := make([]desired.CandidateEntry, 0, 129)
 	for index := 0; index < 127; index++ {
-		track := desired.Track{URI: fmt.Sprintf("spotify:track:padding%03d", index), Name: "Padding", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 1000}
+		track := desired.Track{URI: fmt.Sprintf("spotify:track:padding%03d", index), Name: "Padding", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
 		tracks = append(tracks, desired.CandidateEntry{Position: index, Kind: desired.EntrySupported, Track: &track})
 	}
 	for _, id := range []string{"audit", "target"} {
-		track := desired.Track{URI: "spotify:track:" + id, Name: id, Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 1000}
+		track := desired.Track{URI: "spotify:track:" + id, Name: id, Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
 		tracks = append(tracks, desired.CandidateEntry{Position: len(tracks), Kind: desired.EntrySupported, Track: &track})
 	}
 	if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), desired.Candidate{LikedSongs: tracks}); err != nil {
@@ -472,8 +472,8 @@ fi`, allowBad)
 		return nil, errors.New("retriever must not run")
 	}))
 	defer stop()
-	good := desired.Track{URI: "spotify:track:good", Name: "good", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 1000}
-	bad := desired.Track{URI: "spotify:track:bad", Name: "bad", Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 1000}
+	good := desired.Track{URI: "spotify:track:good", Name: "good", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
+	bad := desired.Track{URI: "spotify:track:bad", Name: "bad", Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
 	if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), desired.Candidate{LikedSongs: []desired.CandidateEntry{{Position: 0, Kind: desired.EntrySupported, Track: &good}, {Position: 1, Kind: desired.EntrySupported, Track: &bad}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ printf '%%s\n' '{"entries":[]}'`, calls, started, finished)
 	entries := make([]desired.CandidateEntry, 0, 2)
 	now := time.Now().UTC()
 	for index, id := range []string{"cancel-a", "cancel-b"} {
-		track := desired.Track{URI: "spotify:track:" + id, Name: id, Artists: []desired.NamedURI{{Name: "Artist"}}, DurationMS: 1000}
+		track := desired.Track{URI: "spotify:track:" + id, Name: id, Artists: []desired.NamedURI{{URI: "spotify:artist:one", Name: "Artist"}}, Album: desired.NamedURI{URI: "spotify:album:one", Name: "Album"}, DurationMS: 1000}
 		entries = append(entries, desired.CandidateEntry{Position: index, Kind: desired.EntrySupported, Track: &track})
 	}
 	if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), desired.Candidate{LikedSongs: entries}); err != nil {

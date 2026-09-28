@@ -606,16 +606,28 @@ func materializeEntries(entries []json.RawMessage, tracks map[string]desired.Tra
 
 func materializeTrack(data json.RawMessage) (desired.Track, error) {
 	var track struct {
-		URI        string            `json:"uri"`
-		Name       string            `json:"name"`
-		Artists    []json.RawMessage `json:"artists"`
-		Album      json.RawMessage   `json:"album"`
-		DurationMS int               `json:"duration_ms"`
+		URI         string            `json:"uri"`
+		Name        string            `json:"name"`
+		Artists     []json.RawMessage `json:"artists"`
+		Album       json.RawMessage   `json:"album"`
+		DurationMS  int               `json:"duration_ms"`
+		AlbumArtist string            `json:"album_artist"`
+		TrackNumber *int              `json:"track_number"`
+		DiscNumber  *int              `json:"disc_number"`
+		ReleaseDate string            `json:"release_date"`
+		ArtworkURL  string            `json:"artwork_url"`
 	}
-	if !decodeExactObject(data, &track, "uri", "name", "artists", "album", "duration_ms") || track.URI == "" || track.Name == "" || track.DurationMS <= 0 || len(track.Artists) == 0 {
+	fields, ok := decodeObject(data)
+	if !ok || !exactFieldsWithOptional(fields, []string{"uri", "name", "artists", "album", "duration_ms"}, []string{"album_artist", "track_number", "disc_number", "release_date", "artwork_url"}) || json.Unmarshal(data, &track) != nil || len(track.Artists) == 0 {
 		return desired.Track{}, errors.New("invalid track")
 	}
-	result := desired.Track{URI: track.URI, Name: track.Name, Artists: make([]desired.NamedURI, 0, len(track.Artists)), DurationMS: track.DurationMS}
+	for _, key := range []string{"album_artist", "track_number", "disc_number", "release_date", "artwork_url"} {
+		if value, exists := fields[key]; exists && string(value) == "null" {
+			return desired.Track{}, errors.New("null optional track metadata")
+		}
+	}
+	result := desired.Track{URI: track.URI, Name: track.Name, Artists: make([]desired.NamedURI, 0, len(track.Artists)), DurationMS: track.DurationMS,
+		AlbumArtist: track.AlbumArtist, TrackNumber: track.TrackNumber, DiscNumber: track.DiscNumber, ReleaseDate: track.ReleaseDate, ArtworkURL: track.ArtworkURL}
 	for _, rawArtist := range track.Artists {
 		artist, err := materializeNamedURI(rawArtist)
 		if err != nil {
@@ -628,7 +640,29 @@ func materializeTrack(data json.RawMessage) (desired.Track, error) {
 		return desired.Track{}, err
 	}
 	result.Album = album
+	if err := desired.ValidateTrack(result); err != nil {
+		return desired.Track{}, err
+	}
 	return result, nil
+}
+
+func exactFieldsWithOptional(fields map[string]json.RawMessage, required, optional []string) bool {
+	allowed := make(map[string]bool, len(required)+len(optional))
+	for _, key := range required {
+		if _, ok := fields[key]; !ok {
+			return false
+		}
+		allowed[key] = true
+	}
+	for _, key := range optional {
+		allowed[key] = true
+	}
+	for key := range fields {
+		if !allowed[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func materializeNamedURI(data json.RawMessage) (desired.NamedURI, error) {

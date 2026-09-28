@@ -307,13 +307,14 @@ func TestYouTubeAcquisitionMigrationPreservesDirectWork(t *testing.T) {
 		}
 	}
 	track := acquisitionTrack("spotify:track:one")
-	if _, _, _, err := d.ApplyDesiredSpotifyState(ctx, desired.Candidate{LikedSongs: []desired.CandidateEntry{{Kind: desired.EntrySupported, Track: &track}}}); err != nil {
+	insertTrack(t, d, track)
+	if _, err := d.ExecContext(ctx, `INSERT INTO liked_entries(position, kind, track_uri) VALUES (0, 'supported', ?)`, track.URI); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ExecContext(ctx, `INSERT INTO acquisition_work(track_uri, source_url, state, error, created_at, updated_at) VALUES (?, ?, 'pending', '', 'before', 'before')`, track.URI, "https://authorized.example/one"); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{5, 6, 7}) {
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{5, 6, 7, 8}) {
 		t.Fatalf("migration = %v, %v", applied, err)
 	}
 	work, err := d.Acquisition(ctx, 1)
