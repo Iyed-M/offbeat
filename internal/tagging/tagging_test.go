@@ -40,6 +40,9 @@ func tools(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(name); err != nil {
+			if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+				t.Fatalf("required tagging check needs %s: %v", name, err)
+			}
 			t.Skipf("%s not available", name)
 		}
 	}
@@ -54,7 +57,10 @@ func sampleTrack() desired.Track {
 func TestStagedTextTagsAndUnchangedAudio(t *testing.T) {
 	tools(t)
 	if err := exec.Command("python3", "-c", "import mutagen; assert mutagen.version_string == '1.47.0'").Run(); err != nil {
-		t.Skip("pinned offline Mutagen interpreter not installed; run through uv offline test environment")
+		if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+			t.Fatal("pinned Mutagen 1.47.0 unavailable: provision Python3 offline before required native-tag check")
+		}
+		t.Skip("pinned offline Mutagen interpreter not installed; run the required native-tag check")
 	}
 	for _, extension := range []string{"opus", "ogg", "flac", "mp3", "m4a", "wav", "aac"} {
 		t.Run(extension, func(t *testing.T) {
@@ -158,5 +164,17 @@ func TestTagProcessStopsOnCancellationAndBoundsOutput(t *testing.T) {
 	}
 	if err := run(context.Background(), exec.Command("sh", "-c", "printf 'private/path-or-url'"), 4); err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatalf("oversized helper output was returned: %v", err)
+	}
+}
+
+func TestMissingTagRuntimeProducesActionablePrivateDiagnostic(t *testing.T) {
+	tools(t)
+	source := fixture(t, "flac")
+	path := source.Name()
+	t.Setenv("PATH", t.TempDir())
+	result := Stage(context.Background(), source, "flac", sampleTrack(), "/usr/bin/ffmpeg", "/usr/bin/ffprobe")
+	defer result.Close()
+	if result.State != Failed || !strings.Contains(result.Error, "Python3") || strings.Contains(result.Error, path) {
+		t.Fatalf("missing runtime diagnostic = %q", result.Error)
 	}
 }

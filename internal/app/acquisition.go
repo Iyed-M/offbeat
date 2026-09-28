@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
+	"github.com/Iyed-M/offbeat/internal/managed"
 	"github.com/Iyed-M/offbeat/internal/tagging"
 )
 
@@ -314,9 +316,52 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	}
 	d.managedMu.Lock()
 	err := d.requireMissingTrack(ctx, work.TrackURI)
-	d.managedMu.Unlock()
 	if err != nil {
+		d.managedMu.Unlock()
 		fail("track is no longer desired or missing")
+		return
+	}
+	// Publication may have succeeded immediately before the DB commit failed.
+	// Recover that exact root-confined orphan before resolving or retrieving a
+	// source again. An invalid orphan blocks work rather than being overwritten.
+	orphan, extension, orphanErr := d.managedFiles.OpenOrphan(work.TrackURI)
+	if orphanErr == nil {
+		defer orphan.Close()
+		before, statErr := orphan.Stat()
+		if statErr != nil {
+			d.managedMu.Unlock()
+			fail("managed orphan cannot be inspected safely; repair or remove it before retry")
+			return
+		}
+		if err := acquisition.VerifyOrphan(ctx, orphan, extension, d.Cfg.Downloader.FFprobePath, d.Cfg.Downloader.FFmpegPath); err != nil {
+			d.managedMu.Unlock()
+			if ctx.Err() == nil {
+				fail(err.Error())
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			d.managedMu.Unlock()
+			return
+		}
+		if !d.managedFiles.OrphanUnchanged(work.TrackURI, extension, orphan, before) {
+			d.managedMu.Unlock()
+			fail("managed orphan changed during verification; retry after repairing it")
+			return
+		}
+		path := managed.TrackPath(work.TrackURI, extension)
+		if err := d.DB.CompleteTaggedAcquisition(ctx, work.ID, path, "pending", ""); err != nil {
+			d.managedMu.Unlock()
+			fail("could not commit recovered managed audio; retry acquisition")
+			return
+		}
+		d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
+		d.managedMu.Unlock()
+		return
+	}
+	d.managedMu.Unlock()
+	if !errors.Is(orphanErr, os.ErrNotExist) {
+		fail("managed orphan cannot be opened safely; repair or remove it before retry")
 		return
 	}
 	if work.SourceKind == db.AcquisitionSourceYouTube && work.SourceURL == "" {
@@ -386,15 +431,10 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	if tags.File != nil {
 		source = tags.File
 	}
-	path, adopted, err := d.managedFiles.PublishNew(ctx, work.TrackURI, source, media.Extension)
+	path, err := d.managedFiles.PublishNew(ctx, work.TrackURI, source, media.Extension)
 	if err != nil {
 		fail("could not publish managed audio")
 		return
-	}
-	// An earlier publish can survive a failed DB commit. Its tag outcome is
-	// unknown; adopting it must not claim this attempt's staged tags landed.
-	if adopted {
-		tags.State, tags.Error = "pending", ""
 	}
 	if err := d.DB.CompleteTaggedAcquisition(ctx, work.ID, path, tags.State, tags.Error); err != nil {
 		fail("could not commit managed audio; retry acquisition")

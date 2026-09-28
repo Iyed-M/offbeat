@@ -7,17 +7,18 @@ No network access or package installation is performed here.
 import json
 import sys
 
-import mutagen
-from mutagen.flac import FLAC
-from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TXXX
-from mutagen.mp4 import MP4
-from mutagen.oggopus import OggOpus
-from mutagen.oggvorbis import OggVorbis
+try:
+    import mutagen
+    from mutagen.flac import FLAC
+    from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TXXX
+    from mutagen.mp4 import MP4
+    from mutagen.oggopus import OggOpus
+    from mutagen.oggvorbis import OggVorbis
+except ImportError:
+    sys.exit(2)
 
 
 def write(path, extension, data):
-    if mutagen.version_string != "1.47.0":
-        raise ValueError("unsupported Mutagen version")
     artists = data["artists"]
     if extension in ("opus", "ogg", "flac"):
         audio = {"opus": OggOpus, "ogg": OggVorbis, "flac": FLAC}[extension](path)
@@ -79,6 +80,8 @@ def write(path, extension, data):
 if __name__ == "__main__":
     # No traceback: exceptions may contain private filesystem paths or metadata.
     try:
+        if mutagen.version_string != "1.47.0":
+            sys.exit(3)
         if len(sys.argv) != 3:
             raise ValueError("invalid arguments")
         payload = sys.stdin.buffer.read(128 * 1024 + 1)

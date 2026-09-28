@@ -113,8 +113,18 @@ func Stage(ctx context.Context, source *os.File, extension string, track desired
 	defer cancel()
 	cmd := exec.CommandContext(bounded, "python3", "-I", scriptPath, name, extension)
 	cmd.Stdin = bytes.NewReader(payload)
-	if run(bounded, cmd, 4096) != nil {
-		return failure("tag writer unavailable or failed")
+	if err := run(bounded, cmd, 4096); err != nil {
+		var exit *helperExit
+		switch {
+		case errors.As(err, &exit) && exit.code == 2:
+			return failure("Mutagen unavailable; provision Python3 and Mutagen 1.47.0 offline")
+		case errors.As(err, &exit) && exit.code == 3:
+			return failure("Mutagen version mismatch; provision Mutagen 1.47.0 offline")
+		case errors.Is(err, exec.ErrNotFound):
+			return failure("Python3 unavailable; provision Python3 and Mutagen 1.47.0 offline")
+		default:
+			return failure("native tag writer failed; original audio retained")
+		}
 	}
 	if verify(bounded, source.Name(), name, ffmpeg, ffprobe) != nil {
 		return failure("tagged audio verification failed")
@@ -141,11 +151,25 @@ func run(ctx context.Context, cmd *exec.Cmd, limit int) error {
 		}
 		return nil
 	}
-	if err := cmd.Run(); err != nil || ctx.Err() != nil || output.overflow {
+	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return exec.ErrNotFound
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return &helperExit{code: exit.ExitCode()}
+		}
+		return errors.New("tagging process failed")
+	}
+	if ctx.Err() != nil || output.overflow {
 		return errors.New("tagging process failed")
 	}
 	return nil
 }
+
+type helperExit struct{ code int }
+
+func (e *helperExit) Error() string { return "tagging helper exited" }
 
 type limitedOutput struct {
 	limit    int

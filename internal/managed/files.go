@@ -315,6 +315,61 @@ func (f *Files) Available(uri, path string) bool {
 	return err == nil && n == 1
 }
 
+// OpenOrphan opens the sole identity-derived track file, if one exists, via
+// the managed root. It does not claim the media is playable: callers must
+// inspect its actual container/codec and decode it before registering it.
+// A malformed or ambiguous candidate blocks recovery rather than allowing a
+// new download to overwrite it. The returned descriptor belongs to the caller.
+func (f *Files) OpenOrphan(uri string) (*os.File, string, error) {
+	if uri == "" || f.checkDir("tracks") != nil {
+		return nil, "", fmt.Errorf("invalid managed tracks directory or identity")
+	}
+	var found string
+	var extension string
+	for _, ext := range []string{"opus", "ogg", "mp3", "m4a", "flac", "wav", "aac"} {
+		name := TrackPath(uri, ext)
+		_, err := f.root.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("inspect managed orphan: %w", err)
+		}
+		if found != "" {
+			return nil, "", fmt.Errorf("multiple managed orphan candidates")
+		}
+		found, extension = name, ext
+	}
+	if found == "" {
+		return nil, "", os.ErrNotExist
+	}
+	file, err := f.root.OpenFile(found, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("open managed orphan: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > 512<<20 {
+		_ = file.Close()
+		return nil, "", fmt.Errorf("managed orphan is not a bounded regular file")
+	}
+	return file, extension, nil
+}
+
+// OrphanUnchanged checks that the verified descriptor still names the same
+// managed file immediately before its DB mapping is committed.
+func (f *Files) OrphanUnchanged(uri, extension string, file *os.File, before os.FileInfo) bool {
+	if file == nil || !validExtension(extension) || f.checkDir("tracks") != nil {
+		return false
+	}
+	current, err := f.root.Lstat(TrackPath(uri, extension))
+	if err != nil || !current.Mode().IsRegular() {
+		return false
+	}
+	verified, err := file.Stat()
+	return err == nil && os.SameFile(current, verified) && os.SameFile(before, verified) &&
+		current.Size() == before.Size() && current.ModTime() == before.ModTime()
+}
+
 // Publish copies a verified staged audio file into a root-owned temporary
 // file, then atomically installs it at its identity-derived managed path. The
 // staged file is intentionally accepted as an open descriptor: callers cannot
@@ -323,19 +378,14 @@ func (f *Files) Publish(uri string, source *os.File, extension string) (string, 
 	return f.publish(context.Background(), uri, source, extension, false)
 }
 
-// PublishNew refuses to replace a preexisting track (including an orphan from
-// an interrupted database commit). The boolean says an existing file was
-// adopted, so callers do not mistake this attempt's tags for its actual tags.
-func (f *Files) PublishNew(ctx context.Context, uri string, source *os.File, extension string) (string, bool, error) {
+// PublishNew refuses to replace a preexisting track, including an orphan from
+// an interrupted database commit. Orphans are verified separately before any
+// retrieval, never implicitly adopted by this publication boundary.
+func (f *Files) PublishNew(ctx context.Context, uri string, source *os.File, extension string) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", false, err
+		return "", err
 	}
-	final := TrackPath(uri, extension)
-	if f.Available(uri, final) {
-		return final, true, nil
-	}
-	path, err := f.publish(ctx, uri, source, extension, true)
-	return path, false, err
+	return f.publish(ctx, uri, source, extension, true)
 }
 
 func (f *Files) publish(ctx context.Context, uri string, source *os.File, extension string, newOnly bool) (string, error) {
@@ -367,7 +417,7 @@ func (f *Files) publish(ctx context.Context, uri string, source *os.File, extens
 	final := TrackPath(uri, extension)
 	if newOnly {
 		if _, err := f.root.Lstat(final); err == nil {
-			// A file appeared since PublishNew checked for an orphan.
+			// An orphan exists or a file appeared since the recovery check.
 			// Never replace it, even if it is currently unreadable.
 			return "", fmt.Errorf("managed track already exists but is unavailable")
 		} else if !os.IsNotExist(err) {

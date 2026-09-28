@@ -850,12 +850,31 @@ func TestAcquisitionRealToolsMakesMissingTrackAvailable(t *testing.T) {
 }
 
 func TestAcquisitionCommitFailureStaysMissingAndCanRetry(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	fixtures, err := managed.Open(fixtureRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixturePath, err := fixtures.PublishSynthetic("recovery-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtures.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(fixtureRoot, fixturePath)
 	home, err := os.MkdirTemp("", "offbeat-m6-commit-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) { return fakeMedia(t) }), 1)
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		file, err := os.Open(fixture)
+		if err != nil {
+			return nil, err
+		}
+		return &acquisition.Media{File: file, Extension: "wav"}, nil
+	}), 1)
 	seedAcquisitionTracks(t, d, "one")
 	if _, err := d.DB.Exec(`CREATE TRIGGER fail_acquired_mapping BEFORE INSERT ON managed_tracks BEGIN SELECT RAISE(ABORT, 'injected mapping failure'); END`); err != nil {
 		t.Fatal(err)

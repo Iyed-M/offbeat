@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
@@ -16,6 +17,9 @@ import (
 func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 	for _, tool := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+				t.Fatalf("required tagging check needs %s: %v", tool, err)
+			}
 			t.Skipf("%s unavailable", tool)
 		}
 	}
@@ -27,6 +31,9 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.expected == "tagged" && !withMutagen {
+				if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+					t.Fatal("pinned Mutagen 1.47.0 unavailable: provision offline before required integration check")
+				}
 				t.Skip("pinned offline Mutagen interpreter unavailable")
 			}
 			home := t.TempDir()
@@ -127,11 +134,11 @@ func TestCanceledOrConflictingPublicationPreservesGoodTrack(t *testing.T) {
 	defer replacement.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := files.PublishNew(ctx, uri, replacement, "wav"); err == nil {
+	if _, err := files.PublishNew(ctx, uri, replacement, "wav"); err == nil {
 		t.Fatal("canceled publish succeeded")
 	}
-	if _, adopted, err := files.PublishNew(context.Background(), uri, replacement, "wav"); err != nil || !adopted {
-		t.Fatalf("adoption = %v %v", adopted, err)
+	if _, err := files.PublishNew(context.Background(), uri, replacement, "wav"); err == nil {
+		t.Fatal("existing track overwritten")
 	}
 	bytesOnDisk, err := os.ReadFile(filepath.Join(root, path))
 	if err != nil || string(bytesOnDisk) != "previous valid audio" {
@@ -141,4 +148,136 @@ func TestCanceledOrConflictingPublicationPreservesGoodTrack(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("staging left in managed root: %v %v", entries, err)
 	}
+	orphan, extension, err := files.OpenOrphan(uri)
+	if err != nil || extension != "wav" {
+		t.Fatalf("open orphan: %s %v", extension, err)
+	}
+	defer orphan.Close()
+	before, err := orphan.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherCopy := filepath.Join(root, "tracks", ".swapped")
+	if err := os.WriteFile(otherCopy, bytesOnDisk, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(otherCopy, filepath.Join(root, path)); err != nil {
+		t.Fatal(err)
+	}
+	if files.OrphanUnchanged(uri, extension, orphan, before) {
+		t.Fatal("replaced orphan accepted after verification")
+	}
+}
+
+func TestOrphanRecoveryDoesNotAdoptCorruptAudioOrRetrieveAgain(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s unavailable", tool)
+		}
+	}
+	for _, crash := range []bool{false, true} {
+		name := "retry"
+		if crash {
+			name = "restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			fixture := filepath.Join(home, "fixture.wav")
+			if out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2", "-c:a", "pcm_s16le", fixture).CombinedOutput(); err != nil {
+				t.Fatalf("fixture: %v %s", err, out)
+			}
+			var calls atomic.Int32
+			retriever := retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+				calls.Add(1)
+				file, err := os.Open(fixture)
+				return &acquisition.Media{File: file, Extension: "wav"}, err
+			})
+			d := acquisitionDaemon(t, home, retriever, 1)
+			seedAcquisitionTracks(t, d, "one")
+			ctx := context.Background()
+			if _, err := d.DB.Exec(`CREATE TRIGGER fail_mapping BEFORE INSERT ON managed_tracks BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.DB.EnqueueAcquisition(ctx, "spotify:track:one", "https://fixture.test/audio"); err != nil {
+				t.Fatal(err)
+			}
+			work, err := d.DB.ClaimAcquisition(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.runAcquisition(ctx, work)
+			work, err = d.DB.Acquisition(ctx, work.ID)
+			if err != nil || work.State != db.AcquisitionFailed || calls.Load() != 1 {
+				t.Fatalf("initial failure: %+v %v calls=%d", work, err, calls.Load())
+			}
+			path := filepath.Join(d.Cfg.Paths.MusicRoot, managed.TrackPath(work.TrackURI, "wav"))
+			if err := os.WriteFile(path, []byte("nonempty but not audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.DB.Exec(`DROP TRIGGER fail_mapping`); err != nil {
+				t.Fatal(err)
+			}
+			if crash {
+				if err := d.Close(); err != nil {
+					t.Fatal(err)
+				}
+				d = acquisitionDaemon(t, home, retriever, 1)
+			}
+			defer d.Close()
+			if _, err := d.DB.RetryAcquisition(ctx, work.ID); err != nil {
+				t.Fatal(err)
+			}
+			work, err = d.DB.ClaimAcquisition(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.runAcquisition(ctx, work)
+			work, err = d.DB.Acquisition(ctx, work.ID)
+			if err != nil || work.State == db.AcquisitionComplete {
+				t.Fatalf("corrupt orphan adopted: %+v %v", work, err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("corrupt orphan redownloaded: %d", calls.Load())
+			}
+			if err := os.WriteFile(path, mustReadFixture(t, fixture), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.DB.RetryAcquisition(ctx, work.ID); err != nil {
+				t.Fatal(err)
+			}
+			work, err = d.DB.ClaimAcquisition(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if crash {
+				// Simulate a crash with running work and a fully published,
+				// unregistered file. Startup recovery must adopt without Retrieve.
+				if err := d.Close(); err != nil {
+					t.Fatal(err)
+				}
+				d = acquisitionDaemon(t, home, retriever, 1)
+				if err := d.DB.RecoverAcquisitions(ctx); err != nil {
+					t.Fatal(err)
+				}
+				work, err = d.DB.ClaimAcquisition(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			d.runAcquisition(ctx, work)
+			work, err = d.DB.Acquisition(ctx, work.ID)
+			if err != nil || work.State != db.AcquisitionComplete || calls.Load() != 1 {
+				t.Fatalf("valid orphan not adopted without retrieval: %+v %v calls=%d", work, err, calls.Load())
+			}
+		})
+	}
+}
+
+func mustReadFixture(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
