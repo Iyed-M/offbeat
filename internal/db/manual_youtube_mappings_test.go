@@ -32,7 +32,7 @@ func TestManualMappingMigrationCRUDAndSpotifyRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if versions, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(versions, []int{6, 7, 8, 9}) {
+	if versions, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(versions, []int{6, 7, 8, 9, 10}) {
 		t.Fatalf("upgrade: %v, %v", versions, err)
 	}
 	uri := "spotify:track:one"

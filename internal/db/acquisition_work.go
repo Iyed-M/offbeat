@@ -438,11 +438,20 @@ func (d *DB) CompleteAcquisition(ctx context.Context, id int64, relativePath str
 // CompleteTaggedAcquisition commits audio availability and its independent
 // text-tag outcome together; no tag failure can turn available audio missing.
 func (d *DB) CompleteTaggedAcquisition(ctx context.Context, id int64, relativePath, tagState, tagError string) error {
+	return d.CompletePresentedAcquisition(ctx, id, relativePath, tagState, tagError, "pending", "")
+}
+
+// CompletePresentedAcquisition commits independent text and artwork outcomes
+// alongside the available audio mapping in one transaction.
+func (d *DB) CompletePresentedAcquisition(ctx context.Context, id int64, relativePath, tagState, tagError, artworkState, artworkError string) error {
 	if relativePath == "" {
 		return fmt.Errorf("%w: managed relative path is required", ErrAcquisitionPrecondition)
 	}
 	if (tagState != "pending" && tagState != "tagged" && tagState != "unsupported" && tagState != "failed") || len(tagError) > 128 {
 		return fmt.Errorf("%w: invalid tag outcome", ErrAcquisitionPrecondition)
+	}
+	if (artworkState != "pending" && artworkState != "embedded" && artworkState != "unavailable" && artworkState != "unsupported" && artworkState != "failed") || len(artworkError) > 128 {
+		return fmt.Errorf("%w: invalid artwork outcome", ErrAcquisitionPrecondition)
 	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -464,7 +473,7 @@ func (d *DB) CompleteTaggedAcquisition(ctx context.Context, id int64, relativePa
 	if err := requireDesiredTrack(ctx, tx, work.TrackURI); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error) SELECT uri, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error`, relativePath, tagState, tagError, work.TrackURI)
+	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error, artwork_state, artwork_error) SELECT uri, ?, ?, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error, artwork_state = excluded.artwork_state, artwork_error = excluded.artwork_error`, relativePath, tagState, tagError, artworkState, artworkError, work.TrackURI)
 	if err != nil {
 		return fmt.Errorf("register acquired managed track: %w", err)
 	}

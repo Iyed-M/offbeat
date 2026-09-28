@@ -357,7 +357,7 @@ func TestPresentationMigrationPreservesLegacyStateAndNoOp(t *testing.T) {
 	if _, err := d.ExecContext(ctx, `UPDATE state_metadata SET revision = 3 WHERE singleton_id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{8, 9}) {
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{8, 9, 10}) {
 		t.Fatalf("migration: %v %v", applied, err)
 	}
 	state, _, err := d.ReadDesiredSpotifyState(ctx)

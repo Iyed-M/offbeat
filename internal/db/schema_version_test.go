@@ -27,8 +27,8 @@ func TestSchemaVersionReturnsMaxAppliedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if v != 9 {
-		t.Fatalf("SchemaVersion=%d want 9", v)
+	if v != 10 {
+		t.Fatalf("SchemaVersion=%d want 10", v)
 	}
 }
 

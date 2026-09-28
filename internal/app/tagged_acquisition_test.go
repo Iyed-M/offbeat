@@ -24,10 +24,14 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 		}
 	}
 	withMutagen := exec.Command("python3", "-c", "import mutagen; assert mutagen.version_string == '1.47.0'").Run() == nil
-	for _, tc := range []struct{ name, extension, probe, expected string }{
-		{"tagged", "flac", "ffprobe", "tagged"},
-		{"unsupported", "wav", "ffprobe", "unsupported"},
-		{"tag failure", "flac", "missing-offbeat-probe", "failed"},
+	for _, tc := range []struct {
+		name, extension, probe, expected string
+		artwork                          bool
+	}{
+		{"tagged", "flac", "ffprobe", "tagged", false},
+		{"artwork failure keeps text tags", "flac", "ffprobe", "tagged", true},
+		{"unsupported", "wav", "ffprobe", "unsupported", false},
+		{"tag failure", "flac", "missing-offbeat-probe", "failed", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.expected == "tagged" && !withMutagen {
@@ -54,6 +58,11 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 			d.Cfg.Downloader.FFprobePath = tc.probe
 			seedAcquisitionTracks(t, d, "one")
 			ctx := context.Background()
+			if tc.artwork {
+				if _, err := d.DB.ExecContext(ctx, `UPDATE spotify_tracks SET artwork_url='https://127.0.0.1/unsafe' WHERE uri='spotify:track:one'`); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, err := d.DB.EnqueueAcquisition(ctx, "spotify:track:one", "https://fixture.test/audio"); err != nil {
 				t.Fatal(err)
 			}
@@ -90,6 +99,20 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 			if err := d.DB.QueryRowContext(ctx, `SELECT tag_state, tag_error FROM managed_tracks WHERE track_uri=?`, "spotify:track:one").Scan(&state, &diagnostic); err != nil || state != tc.expected || (tc.expected == "tagged" && diagnostic != "") || (tc.expected != "tagged" && diagnostic == "") {
 				t.Fatalf("tag state = %q %q: %v", state, diagnostic, err)
 			}
+			var artworkState, artworkError string
+			if err := d.DB.QueryRowContext(ctx, `SELECT artwork_state, artwork_error FROM managed_tracks WHERE track_uri=?`, "spotify:track:one").Scan(&artworkState, &artworkError); err != nil {
+				t.Fatal(err)
+			}
+			wantArtwork := "unavailable"
+			if tc.artwork {
+				wantArtwork = "failed"
+			}
+			if tc.extension == "wav" {
+				wantArtwork = "unsupported"
+			}
+			if artworkState != wantArtwork || (tc.artwork && (artworkError == "" || bytes.Contains([]byte(artworkError), []byte("127.0.0.1")))) {
+				t.Fatalf("artwork outcome: %q %q", artworkState, artworkError)
+			}
 			if err := d.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -97,6 +120,9 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 			defer d.Close()
 			if err := d.DB.QueryRowContext(ctx, `SELECT tag_state FROM managed_tracks WHERE track_uri=?`, "spotify:track:one").Scan(&state); err != nil || state != tc.expected {
 				t.Fatalf("restarted tag state = %q: %v", state, err)
+			}
+			if err := d.DB.QueryRowContext(ctx, `SELECT artwork_state FROM managed_tracks WHERE track_uri=?`, "spotify:track:one").Scan(&artworkState); err != nil || artworkState != wantArtwork {
+				t.Fatalf("restarted artwork state = %q: %v", artworkState, err)
 			}
 		})
 	}

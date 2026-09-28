@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
+	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/managed"
@@ -422,7 +423,29 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		fail("could not read Spotify metadata")
 		return
 	}
-	tags := tagging.Stage(ctx, media.File, media.Extension, track, d.Cfg.Downloader.FFmpegPath, d.Cfg.Downloader.FFprobePath)
+	artState, artError := "unavailable", ""
+	var picture *artwork.Image
+	if media.Extension == "wav" || media.Extension == "aac" {
+		artState = "unsupported"
+	} else if track.ArtworkURL != "" {
+		artState = "failed"
+		cover, fetchErr := acquisitionArtwork.Get(ctx, track.Album.URI, track.ArtworkURL)
+		if fetchErr != nil {
+			artError = "artwork fetch or validation failed; retry metadata refresh"
+		} else {
+			picture = &cover
+		}
+	}
+	tags := tagging.StageWithArtwork(ctx, media.File, media.Extension, track, d.Cfg.Downloader.FFmpegPath, d.Cfg.Downloader.FFprobePath, picture)
+	if picture != nil {
+		if tags.State == tagging.Tagged {
+			artState = "embedded"
+		} else if ctx.Err() == nil {
+			artError = "artwork embedding failed; retry metadata refresh"
+			tags.Close()
+			tags = tagging.Stage(ctx, media.File, media.Extension, track, d.Cfg.Downloader.FFmpegPath, d.Cfg.Downloader.FFprobePath)
+		}
+	}
 	defer tags.Close()
 	if ctx.Err() != nil {
 		return
@@ -436,9 +459,11 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		fail("could not publish managed audio")
 		return
 	}
-	if err := d.DB.CompleteTaggedAcquisition(ctx, work.ID, path, tags.State, tags.Error); err != nil {
+	if err := d.DB.CompletePresentedAcquisition(ctx, work.ID, path, tags.State, tags.Error, artState, artError); err != nil {
 		fail("could not commit managed audio; retry acquisition")
 		return
 	}
 	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
 }
+
+var acquisitionArtwork = artwork.New()

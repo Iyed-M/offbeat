@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/desired"
 )
 
@@ -176,5 +180,60 @@ func TestMissingTagRuntimeProducesActionablePrivateDiagnostic(t *testing.T) {
 	defer result.Close()
 	if result.State != Failed || !strings.Contains(result.Error, "Python3") || strings.Contains(result.Error, path) {
 		t.Fatalf("missing runtime diagnostic = %q", result.Error)
+	}
+}
+
+func TestStagedNativeArtworkAndTextTags(t *testing.T) {
+	tools(t)
+	if err := exec.Command("python3", "-c", "import mutagen; assert mutagen.version_string == '1.47.0'").Run(); err != nil {
+		if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+			t.Fatal("pinned Mutagen unavailable")
+		}
+		t.Skip("pinned Mutagen unavailable")
+	}
+	im := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	im.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, im); err != nil {
+		t.Fatal(err)
+	}
+	for _, ext := range []string{"opus", "ogg", "flac", "mp3", "m4a"} {
+		t.Run(ext, func(t *testing.T) {
+			source := fixture(t, ext)
+			result := StageWithArtwork(context.Background(), source, ext, sampleTrack(), "ffmpeg", "ffprobe", &artwork.Image{Data: encoded.Bytes(), MIME: "image/png"})
+			defer result.Close()
+			if result.State != Tagged {
+				t.Fatalf("stage: %+v", result)
+			}
+			// Independent reader checks native picture bytes, title and artist order.
+			inspect := `import sys,base64
+from mutagen.flac import FLAC,Picture
+from mutagen.oggopus import OggOpus
+from mutagen.oggvorbis import OggVorbis
+from mutagen.id3 import ID3
+from mutagen.mp4 import MP4
+p,ext,picture=sys.argv[1:]
+if ext in ('opus','ogg','flac'):
+ a={'opus':OggOpus,'ogg':OggVorbis,'flac':FLAC}[ext](p)
+ assert a['title']==['Fixture Title'] and a['artist']==['First Artist','Second Artist']
+ cover=a.pictures[0] if ext=='flac' else Picture(base64.b64decode(a['metadata_block_picture'][0]))
+ data=cover.data
+ assert cover.type==3 and cover.mime=='image/png'
+elif ext=='mp3':
+ a=ID3(p); assert a['TIT2'].text==['Fixture Title'] and a['TPE1'].text==['First Artist','Second Artist']
+ data=a.getall('APIC')[0].data
+else:
+ a=MP4(p); assert a['\u00a9nam']==['Fixture Title'] and a['\u00a9ART']==['First Artist','Second Artist']
+ data=bytes(a['covr'][0])
+assert data==open(picture,'rb').read()`
+			picture := filepath.Join(t.TempDir(), "cover.png")
+			if err := os.WriteFile(picture, encoded.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("python3", "-c", inspect, result.File.Name(), ext, picture).CombinedOutput()
+			if err != nil {
+				t.Fatalf("native picture: %v %s", err, out)
+			}
+		})
 	}
 }

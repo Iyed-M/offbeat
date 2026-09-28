@@ -6,19 +6,20 @@ No network access or package installation is performed here.
 
 import json
 import sys
+import base64
 
 try:
     import mutagen
-    from mutagen.flac import FLAC
-    from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TXXX
-    from mutagen.mp4 import MP4
+    from mutagen.flac import FLAC, Picture
+    from mutagen.id3 import ID3, ID3NoHeaderError, APIC, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TXXX
+    from mutagen.mp4 import MP4, MP4Cover
     from mutagen.oggopus import OggOpus
     from mutagen.oggvorbis import OggVorbis
 except ImportError:
     sys.exit(2)
 
 
-def write(path, extension, data):
+def write(path, extension, data, picture=None, mime=None):
     artists = data["artists"]
     if extension in ("opus", "ogg", "flac"):
         audio = {"opus": OggOpus, "ogg": OggVorbis, "flac": FLAC}[extension](path)
@@ -34,6 +35,16 @@ def write(path, extension, data):
         for key in ("albumartist", "tracknumber", "discnumber", "date"):
             if key not in fields and key in audio:
                 del audio[key]
+        if picture is not None:
+            cover = Picture()
+            cover.type = 3
+            cover.mime = mime
+            cover.data = picture
+            if extension == "flac":
+                audio.clear_pictures()
+                audio.add_picture(cover)
+            else:
+                audio["metadata_block_picture"] = [base64.b64encode(cover.write()).decode("ascii")]
         audio.save()
     elif extension == "mp3":
         try:
@@ -55,6 +66,9 @@ def write(path, extension, data):
                                 (data["release_date"], "TDRC")):
             if not value:
                 tags.delall(frame_id)
+        if picture is not None:
+            tags.delall("APIC")
+            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=picture))
         tags.save(path, v2_version=4)
     elif extension == "m4a":
         audio = MP4(path)
@@ -72,9 +86,27 @@ def write(path, extension, data):
         for key in ("aART", "trkn", "disk", "\xa9day"):
             if key not in fields and key in audio:
                 del audio[key]
+        if picture is not None:
+            audio["covr"] = [MP4Cover(picture, imageformat=MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG)]
         audio.save()
     else:
         raise ValueError("unsupported format")
+
+    # Read the staged file back, not the in-memory writer, before Go verifies
+    # unchanged decoded audio and publishes the descriptor.
+    if picture is not None:
+        if extension == "flac":
+            saved = FLAC(path)
+            covers = [p.data for p in saved.pictures if p.type == 3 and p.mime == mime]
+        elif extension in ("opus", "ogg"):
+            saved = (OggOpus if extension == "opus" else OggVorbis)(path)
+            covers = [Picture(base64.b64decode(value)).data for value in saved.get("metadata_block_picture", [])]
+        elif extension == "mp3":
+            covers = [p.data for p in ID3(path).getall("APIC") if p.type == 3 and p.mime == mime]
+        else:
+            covers = [bytes(p) for p in MP4(path).get("covr", [])]
+        if picture not in covers:
+            raise ValueError("picture readback failed")
 
 
 if __name__ == "__main__":
@@ -82,11 +114,21 @@ if __name__ == "__main__":
     try:
         if mutagen.version_string != "1.47.0":
             sys.exit(3)
-        if len(sys.argv) != 3:
+        if len(sys.argv) not in (3, 5):
             raise ValueError("invalid arguments")
         payload = sys.stdin.buffer.read(128 * 1024 + 1)
         if len(payload) > 128 * 1024:
             raise ValueError("metadata exceeds limit")
-        write(sys.argv[1], sys.argv[2], json.loads(payload))
+        picture = None
+        mime = None
+        if len(sys.argv) == 5:
+            mime = sys.argv[4]
+            if mime not in ("image/png", "image/jpeg"):
+                raise ValueError("invalid picture type")
+            with open(sys.argv[3], "rb") as file:
+                picture = file.read(5 * 1024 * 1024 + 1)
+            if not picture or len(picture) > 5 * 1024 * 1024:
+                raise ValueError("invalid picture size")
+        write(sys.argv[1], sys.argv[2], json.loads(payload), picture, mime)
     except Exception:
         sys.exit(1)

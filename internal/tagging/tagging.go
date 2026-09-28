@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/desired"
 )
 
@@ -53,6 +54,11 @@ func failure(reason string) Result { return Result{State: Failed, Error: reason}
 // Stage never modifies source. A failed tag/verification returns a sanitized
 // outcome and the caller can publish the original descriptor instead.
 func Stage(ctx context.Context, source *os.File, extension string, track desired.Track, ffmpeg, ffprobe string) Result {
+	return StageWithArtwork(ctx, source, extension, track, ffmpeg, ffprobe, nil)
+}
+
+// StageWithArtwork uses the existing native writer and decoded-audio verification.
+func StageWithArtwork(ctx context.Context, source *os.File, extension string, track desired.Track, ffmpeg, ffprobe string, picture *artwork.Image) Result {
 	if extension == "wav" || extension == "aac" {
 		return Result{State: Unsupported, Error: "native text tags unavailable for format"}
 	}
@@ -109,9 +115,21 @@ func Stage(ctx context.Context, source *os.File, extension string, track desired
 	if os.WriteFile(scriptPath, script, 0o600) != nil {
 		return failure("could not stage tag writer")
 	}
+	if picture != nil {
+		if len(picture.Data) == 0 || len(picture.Data) > 5<<20 || (picture.MIME != "image/png" && picture.MIME != "image/jpeg") {
+			return failure("invalid staged artwork")
+		}
+		if os.WriteFile(filepath.Join(stage, "picture"), picture.Data, 0o600) != nil {
+			return failure("could not stage artwork")
+		}
+	}
 	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(bounded, "python3", "-I", scriptPath, name, extension)
+	args := []string{"-I", scriptPath, name, extension}
+	if picture != nil {
+		args = append(args, filepath.Join(stage, "picture"), picture.MIME)
+	}
+	cmd := exec.CommandContext(bounded, "python3", args...)
 	cmd.Stdin = bytes.NewReader(payload)
 	if err := run(bounded, cmd, 4096); err != nil {
 		var exit *helperExit
