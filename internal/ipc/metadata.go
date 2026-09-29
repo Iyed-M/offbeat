@@ -8,6 +8,7 @@ type MetadataDiagnostic struct {
 type MetadataRefreshResult struct {
 	Considered      int                  `json:"considered"`
 	Changed         int                  `json:"changed"`
+	Partial         int                  `json:"partial"`
 	Skipped         int                  `json:"skipped"`
 	Failed          int                  `json:"failed"`
 	Missing         int                  `json:"missing"`

@@ -444,6 +444,13 @@ func (d *DB) CompleteTaggedAcquisition(ctx context.Context, id int64, relativePa
 // CompletePresentedAcquisition commits independent text and artwork outcomes
 // alongside the available audio mapping in one transaction.
 func (d *DB) CompletePresentedAcquisition(ctx context.Context, id int64, relativePath, tagState, tagError, artworkState, artworkError string) error {
+	return d.CompletePresentedAcquisitionWithFingerprints(ctx, id, relativePath, tagState, tagError, artworkState, artworkError, "", "", "")
+}
+
+// CompletePresentedAcquisitionWithFingerprints records only presentation
+// actually published and checked at the managed path. Orphan adoption uses
+// the wrapper above and deliberately retains pending/unknown fingerprints.
+func (d *DB) CompletePresentedAcquisitionWithFingerprints(ctx context.Context, id int64, relativePath, tagState, tagError, artworkState, artworkError, tagFingerprint, artworkFingerprint, fileSHA string) error {
 	if relativePath == "" {
 		return fmt.Errorf("%w: managed relative path is required", ErrAcquisitionPrecondition)
 	}
@@ -452,6 +459,9 @@ func (d *DB) CompletePresentedAcquisition(ctx context.Context, id int64, relativ
 	}
 	if (artworkState != "pending" && artworkState != "embedded" && artworkState != "unavailable" && artworkState != "unsupported" && artworkState != "failed") || len(artworkError) > 128 {
 		return fmt.Errorf("%w: invalid artwork outcome", ErrAcquisitionPrecondition)
+	}
+	if (tagFingerprint != "" && (len(tagFingerprint) != 64 || tagState != "tagged" && tagState != "unsupported")) || (artworkFingerprint != "" && (len(artworkFingerprint) != 64 || artworkState != "embedded" && artworkState != "unavailable" && artworkState != "unsupported")) || (fileSHA != "" && len(fileSHA) != 64) {
+		return fmt.Errorf("%w: invalid presentation fingerprints", ErrAcquisitionPrecondition)
 	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -473,7 +483,7 @@ func (d *DB) CompletePresentedAcquisition(ctx context.Context, id int64, relativ
 	if err := requireDesiredTrack(ctx, tx, work.TrackURI); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error, artwork_state, artwork_error) SELECT uri, ?, ?, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error, artwork_state = excluded.artwork_state, artwork_error = excluded.artwork_error, tag_fingerprint='', artwork_fingerprint='', file_sha256='', refresh_intent=''`, relativePath, tagState, tagError, artworkState, artworkError, work.TrackURI)
+	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error, artwork_state, artwork_error, tag_fingerprint, artwork_fingerprint, file_sha256) SELECT uri, ?, ?, ?, ?, ?, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error, artwork_state = excluded.artwork_state, artwork_error = excluded.artwork_error, tag_fingerprint=excluded.tag_fingerprint, artwork_fingerprint=excluded.artwork_fingerprint, file_sha256=excluded.file_sha256, refresh_intent=''`, relativePath, tagState, tagError, artworkState, artworkError, tagFingerprint, artworkFingerprint, fileSHA, work.TrackURI)
 	if err != nil {
 		return fmt.Errorf("register acquired managed track: %w", err)
 	}

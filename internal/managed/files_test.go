@@ -99,6 +99,64 @@ func TestReconcileReplacementRestoresDisplacedChangedAudio(t *testing.T) {
 	}
 }
 
+func TestDiscardUnpublishedReplacementPreservesUnexpectedAudio(t *testing.T) {
+	root := t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	uri := "spotify:track:one"
+	name := managed.TrackPath(uri, "flac")
+	prior := []byte("existing good audio")
+	if err := os.WriteFile(filepath.Join(root, name), prior, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	original, err := files.OpenManaged(uri, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousSHA, err := managed.Digest(context.Background(), original)
+	original.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := managed.NewRefreshTemporary()
+	if err := os.WriteFile(filepath.Join(root, staged), []byte("unexpected displaced valid audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.DiscardUnpublishedReplacement(context.Background(), uri, name, staged, previousSHA, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("unexpected displaced audio deleted")
+	}
+	if got, err := os.ReadFile(filepath.Join(root, staged)); err != nil || string(got) != "unexpected displaced valid audio" {
+		t.Fatalf("backup lost: %s %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, name)); err != nil || !bytes.Equal(got, prior) {
+		t.Fatalf("original lost: %s %v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, staged), []byte("new staged audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	temp, err := os.Open(filepath.Join(root, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSHA, err := managed.Digest(context.Background(), temp)
+	temp.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.DiscardUnpublishedReplacement(context.Background(), uri, name, staged, previousSHA, newSHA); err != nil {
+		t.Fatalf("safe stale cleanup: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, staged)); !os.IsNotExist(err) {
+		t.Fatalf("stale staged audio retained: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, name)); err != nil || !bytes.Equal(got, prior) {
+		t.Fatalf("cleanup lost original: %s %v", got, err)
+	}
+}
+
 func TestManagedFilesRejectInvalidFiles(t *testing.T) {
 	for _, kind := range []string{"absent", "empty", "unreadable", "directory", "fifo", "symlink"} {
 		t.Run(kind, func(t *testing.T) {

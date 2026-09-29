@@ -19,6 +19,7 @@ import (
 	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/db"
+	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/managed"
 )
 
@@ -121,6 +122,25 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 			if artworkState != wantArtwork || (tc.artwork && (artworkError == "" || bytes.Contains([]byte(artworkError), []byte("127.0.0.1")))) {
 				t.Fatalf("artwork outcome: %q %q", artworkState, artworkError)
 			}
+			var textFingerprint, artFingerprint, fileSHA string
+			if err := d.DB.QueryRowContext(ctx, `SELECT tag_fingerprint, artwork_fingerprint, file_sha256 FROM managed_tracks WHERE track_uri=?`, "spotify:track:one").Scan(&textFingerprint, &artFingerprint, &fileSHA); err != nil || len(fileSHA) != 64 || (tc.expected == "failed" && textFingerprint != "") || (tc.expected != "failed" && len(textFingerprint) != 64) || (tc.artwork && artFingerprint != "") || (!tc.artwork && len(artFingerprint) != 64) {
+				t.Fatalf("published fingerprints: text=%q art=%q sha=%q err=%v", textFingerprint, artFingerprint, fileSHA, err)
+			}
+			if (tc.expected == "tagged" && !tc.artwork) || tc.expected == "unsupported" {
+				before, err := os.Stat(filepath.Join(d.Cfg.Paths.MusicRoot, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				value, err := d.handleControlRequest(ctx, ipc.Request{Command: "metadata.refresh"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				refresh := value.(ipc.MetadataRefreshResult)
+				after, err := os.Stat(filepath.Join(d.Cfg.Paths.MusicRoot, path))
+				if err != nil || refresh.Skipped != 1 || refresh.Changed != 0 || refresh.Failed != 0 || !os.SameFile(before, after) {
+					t.Fatalf("first refresh rewrote new acquisition: %+v %v", refresh, err)
+				}
+			}
 			if err := d.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -201,6 +221,19 @@ func TestAcquisitionEmbedsFetchedArtworkBeforePublication(t *testing.T) {
 	var storedPath, tagState, artState, artError string
 	if err := d.DB.QueryRowContext(ctx, `SELECT relative_path, tag_state, artwork_state, artwork_error FROM managed_tracks WHERE track_uri='spotify:track:one'`).Scan(&storedPath, &tagState, &artState, &artError); err != nil || storedPath != path || tagState != "tagged" || artState != "embedded" || artError != "" {
 		t.Fatalf("committed presentation: %q %q %q %q: %v", storedPath, tagState, artState, artError, err)
+	}
+	beforeRefresh, err := os.Stat(filepath.Join(d.Cfg.Paths.MusicRoot, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := d.handleControlRequest(ctx, ipc.Request{Command: "metadata.refresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh := value.(ipc.MetadataRefreshResult)
+	afterRefresh, err := os.Stat(filepath.Join(d.Cfg.Paths.MusicRoot, path))
+	if err != nil || refresh.Skipped != 1 || refresh.Changed != 0 || refresh.Failed != 0 || !os.SameFile(beforeRefresh, afterRefresh) || fetches.Load() != 1 {
+		t.Fatalf("art acquisition rewritten/refetched: %+v %v fetches=%d", refresh, err, fetches.Load())
 	}
 	published := filepath.Join(d.Cfg.Paths.MusicRoot, path)
 	// Independent native readback from the published file, including the exact
@@ -404,6 +437,10 @@ func TestOrphanRecoveryDoesNotAdoptCorruptAudioOrRetrieveAgain(t *testing.T) {
 			work, err = d.DB.Acquisition(ctx, work.ID)
 			if err != nil || work.State != db.AcquisitionComplete || calls.Load() != 1 {
 				t.Fatalf("valid orphan not adopted without retrieval: %+v %v calls=%d", work, err, calls.Load())
+			}
+			var tagState, artState, textHash, artHash, fileSHA string
+			if err := d.DB.QueryRowContext(ctx, `SELECT tag_state, artwork_state, tag_fingerprint, artwork_fingerprint, file_sha256 FROM managed_tracks WHERE track_uri=?`, work.TrackURI).Scan(&tagState, &artState, &textHash, &artHash, &fileSHA); err != nil || tagState != "pending" || artState != "pending" || textHash != "" || artHash != "" || fileSHA != "" {
+				t.Fatalf("orphan adopted as falsely tagged: %q %q %q %q %q %v", tagState, artState, textHash, artHash, fileSHA, err)
 			}
 		})
 	}

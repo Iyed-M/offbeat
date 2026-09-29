@@ -454,12 +454,35 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	if tags.File != nil {
 		source = tags.File
 	}
+	stagedSHA, err := managed.Digest(ctx, source)
+	if err != nil {
+		fail("could not verify staged audio digest")
+		return
+	}
 	path, err := d.managedFiles.PublishNew(ctx, work.TrackURI, source, media.Extension)
 	if err != nil {
 		fail("could not publish managed audio")
 		return
 	}
-	if err := d.DB.CompletePresentedAcquisition(ctx, work.ID, path, tags.State, tags.Error, artState, artError); err != nil {
+	published, err := d.managedFiles.OpenManaged(work.TrackURI, path)
+	if err != nil {
+		fail("could not inspect published managed audio; retry acquisition")
+		return
+	}
+	publishedSHA, digestErr := managed.Digest(ctx, published)
+	closeErr := published.Close()
+	if digestErr != nil || closeErr != nil || publishedSHA != stagedSHA {
+		fail("published managed audio changed; inspect before retry")
+		return
+	}
+	textHash, artHash := db.PresentationFingerprint(track)
+	if tags.State != tagging.Tagged && tags.State != tagging.Unsupported {
+		textHash = ""
+	}
+	if artState != "embedded" && artState != "unavailable" && artState != "unsupported" {
+		artHash = ""
+	}
+	if err := d.DB.CompletePresentedAcquisitionWithFingerprints(ctx, work.ID, path, tags.State, tags.Error, artState, artError, textHash, artHash, publishedSHA); err != nil {
 		fail("could not commit managed audio; retry acquisition")
 		return
 	}

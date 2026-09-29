@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,8 +10,25 @@ import (
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
 	"github.com/Iyed-M/offbeat/internal/desired"
+	"github.com/Iyed-M/offbeat/internal/ipc"
 	"github.com/Iyed-M/offbeat/internal/managed"
 )
+
+func TestMetadataRefreshPartialAccounting(t *testing.T) {
+	result := ipc.MetadataRefreshResult{Considered: 2, Changed: 2, Partial: 1, Failed: 1, Diagnostics: []ipc.MetadataDiagnostic{{TrackURI: "spotify:track:one", Reason: "artwork failed"}}}
+	if !validMetadataRefreshResult(result) {
+		t.Fatalf("changed text and failed artwork rejected: %+v", result)
+	}
+	var out bytes.Buffer
+	printMetadataRefresh(&out, result)
+	if !strings.Contains(out.String(), "2 changed (1 with outstanding failures)") || !strings.Contains(out.String(), "1 failed") || !strings.Contains(out.String(), "spotify:track:one: artwork failed") {
+		t.Fatalf("partial diagnostic masked in CLI output: %s", out.String())
+	}
+	result.Partial = 0
+	if validMetadataRefreshResult(result) {
+		t.Fatal("overlapping changed and failed counts accepted without partial")
+	}
+}
 
 func TestCLIMetadataRefreshOverControl(t *testing.T) {
 	home := t.TempDir()

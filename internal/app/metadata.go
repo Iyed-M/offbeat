@@ -37,17 +37,20 @@ func (d *Daemon) handleMetadataRefresh(ctx context.Context) (any, error) {
 			result.MissingOptional++
 		}
 		changed, reason := d.refreshTrack(ctx, item)
-		switch {
-		case reason != "":
+		if changed {
+			result.Changed++
+		}
+		if reason != "" {
 			result.Failed++
+			if changed {
+				result.Partial++
+			}
 			if len(result.Diagnostics) < 32 {
 				result.Diagnostics = append(result.Diagnostics, ipc.MetadataDiagnostic{TrackURI: item.Track.URI, Reason: reason})
 			} else {
 				result.Omitted++
 			}
-		case changed:
-			result.Changed++
-		default:
+		} else if !changed {
 			result.Skipped++
 		}
 	}
@@ -82,6 +85,8 @@ func (d *Daemon) refreshTrack(ctx context.Context, item db.ManagedTrack) (bool, 
 			item.RefreshIntent = ""
 		} else if sha != intent.PreviousSHA {
 			return false, "managed file changed during interrupted replacement; inspect before retry"
+		} else if err := d.managedFiles.DiscardUnpublishedReplacement(ctx, uri, name, intent.Temporary, intent.PreviousSHA, intent.SHA256); err != nil {
+			return false, "pending replacement contains unexpected audio; inspect before retry"
 		}
 	}
 	if item.FileSHA256 != "" && sha != item.FileSHA256 {

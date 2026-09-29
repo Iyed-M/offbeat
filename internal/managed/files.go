@@ -442,6 +442,10 @@ func (f *Files) ReplaceManaged(ctx context.Context, uri, name, staged string, or
 			cleanup = false // preserve the displaced good file for manual recovery
 			return fmt.Errorf("managed destination changed; could not restore displaced file: %w", rollbackErr)
 		}
+		if syncErr := dir.Sync(); syncErr != nil {
+			cleanup = false // preserve staged media if the restored entry is not durable
+			return fmt.Errorf("restored managed file but directory sync failed: %w", syncErr)
+		}
 		return fmt.Errorf("managed destination changed: %w", err)
 	}
 	syncErr := dir.Sync()
@@ -450,7 +454,21 @@ func (f *Files) ReplaceManaged(ctx context.Context, uri, name, staged string, or
 			cleanup = false
 			return fmt.Errorf("sync managed directory failed and restore failed: %w", rollbackErr)
 		}
+		if restoreSync := dir.Sync(); restoreSync != nil {
+			cleanup = false
+			return fmt.Errorf("restored managed file but directory sync failed: %w", restoreSync)
+		}
 		return syncErr
+	}
+	// Removing the displaced original is a separate step after its verification
+	// and the new directory entry have reached disk. A failed removal retains
+	// the old copy and the intent so the next refresh can reconcile it.
+	cleanup = false
+	if err := f.root.Remove(staged); err != nil {
+		return fmt.Errorf("could not remove displaced managed audio: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -461,6 +479,46 @@ func NewRefreshTemporary() string { return "tracks/.publish-" + rand.Text() }
 
 func validRefreshTemporary(name string) bool {
 	return strings.HasPrefix(name, "tracks/.publish-") && len(name) == len("tracks/.publish-")+26 && path.Base(name) == strings.TrimPrefix(name, "tracks/")
+}
+
+// DiscardUnpublishedReplacement cleans up an interrupted staging file only
+// when the canonical destination still has the recorded original digest. An
+// unexpected displaced file is preserved for inspection instead of deleted.
+func (f *Files) DiscardUnpublishedReplacement(ctx context.Context, uri, name, temporary, previousSHA, stagedSHA string) error {
+	if !canonicalTrackPath(uri, name) || !validRefreshTemporary(temporary) || f.checkDir("tracks") != nil {
+		return fmt.Errorf("invalid pending replacement")
+	}
+	current, err := f.OpenManaged(uri, name)
+	if err != nil {
+		return err
+	}
+	sha, digestErr := Digest(ctx, current)
+	_ = current.Close()
+	if digestErr != nil || sha != previousSHA {
+		return fmt.Errorf("managed file changed during interrupted replacement")
+	}
+	temp, err := f.root.OpenFile(temporary, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("pending staged file cannot be opened safely")
+	}
+	tempSHA, digestErr := Digest(ctx, temp)
+	_ = temp.Close()
+	if digestErr != nil || (tempSHA != stagedSHA && tempSHA != previousSHA) {
+		return fmt.Errorf("unexpected pending file retained for inspection")
+	}
+	if err := f.root.Remove(temporary); err != nil {
+		return err
+	}
+	dir, err := f.root.Open("tracks")
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }
 
 // ReconcileReplacement checks the displaced file if an exchange was
