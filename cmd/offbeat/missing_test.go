@@ -11,6 +11,7 @@ import (
 
 	"github.com/Iyed-M/offbeat/internal/app"
 	"github.com/Iyed-M/offbeat/internal/desired"
+	"github.com/Iyed-M/offbeat/internal/managed"
 )
 
 func TestCLIMissingDesiredTracks(t *testing.T) {
@@ -184,8 +185,20 @@ func TestCLIMissingLargeLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The first page has no missing tracks, but the CLI must continue past it.
+	// Seed the available files directly: fixture registration also reconciles
+	// every playlist, which would repeatedly probe all files in this CLI test.
+	files, err := managed.Open(d.Cfg.Paths.MusicRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
 	for i := 0; i < 128; i++ {
-		if _, err := d.RegisterSyntheticTrackFixture(context.Background(), fmt.Sprintf("spotify:track:%04d", i)); err != nil {
+		uri := fmt.Sprintf("spotify:track:%04d", i)
+		path, err := files.PublishSynthetic(uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.DB.RegisterManagedTrack(context.Background(), uri, path); err != nil {
 			t.Fatal(err)
 		}
 	}
