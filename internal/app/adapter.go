@@ -313,10 +313,10 @@ func (d *Daemon) acceptSnapshotResponse(session *adapterSession, data []byte) st
 	}
 	d.managedMu.Lock()
 	metadata, summary, changed, err := d.DB.ApplyDesiredSpotifyState(pending.ctx, response.Candidate)
-	if err == nil && changed {
-		d.reconcilePlaylistsAfterCommitLocked(pending.ctx, "Desired Spotify state")
-	}
 	d.managedMu.Unlock()
+	if err == nil && changed {
+		d.reconcilePlaylistsAfterCommit(pending.ctx, "Desired Spotify state")
+	}
 	if err != nil {
 		d.completeSnapshotResponse(pending, snapshotCompletion{err: &persistenceError{err}})
 		return ""

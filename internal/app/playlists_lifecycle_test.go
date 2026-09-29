@@ -44,7 +44,7 @@ func TestSyntheticFixtureRegistrationReconcilesLivePlaylistAvailability(t *testi
 		t.Fatal(err)
 	}
 	playlist := filepath.Join(d.Cfg.Paths.MusicRoot, "playlists", likedSongsPlaylistFilename)
-	assertFileBytes(t, playlist, "#EXTM3U\n../"+onePath+"\n../"+twoPath+"\n")
+	assertFileBytes(t, playlist, "#EXTM3U\n#EXTINF:0.1,Artist - one\n../"+onePath+"\n#EXTINF:0.1,Artist - two\n../"+twoPath+"\n")
 	assertEveryPlaylistPathReadable(t, filepath.Dir(playlist))
 
 	if err := os.Remove(filepath.Join(d.Cfg.Paths.MusicRoot, onePath)); err != nil {
@@ -57,7 +57,7 @@ func TestSyntheticFixtureRegistrationReconcilesLivePlaylistAvailability(t *testi
 	if _, err := d.RegisterSyntheticTrackFixture(context.Background(), two.URI); err != nil {
 		t.Fatal(err)
 	}
-	assertFileBytes(t, playlist, "#EXTM3U\n../"+twoPath+"\n")
+	assertFileBytes(t, playlist, "#EXTM3U\n#EXTINF:0.1,Artist - two\n../"+twoPath+"\n")
 	afterChange, err := os.Stat(playlist)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestDaemonStartupRepairsPlaylistBeforeReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	runAcquisitionDaemon(t, d)
-	assertFileBytes(t, playlist, "#EXTM3U\n../"+path+"\n")
+	assertFileBytes(t, playlist, "#EXTM3U\n#EXTINF:0.1,Artist - startup\n../"+path+"\n")
 	if _, err := os.Lstat(orphanedTemporary); !os.IsNotExist(err) {
 		t.Fatalf("startup left interrupted temporary file behind: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestPostCommitReconciliationFailureKeepsMappingAndLaterConvergesWithoutPath
 	if _, err := d.RegisterSyntheticTrackFixture(context.Background(), track.URI); err != nil {
 		t.Fatal(err)
 	}
-	assertFileBytes(t, filepath.Join(playlistsDir, likedSongsPlaylistFilename), "#EXTM3U\n../"+path+"\n")
+	assertFileBytes(t, filepath.Join(playlistsDir, likedSongsPlaylistFilename), "#EXTM3U\n#EXTINF:0.1,Artist - isolated\n../"+path+"\n")
 }
 
 func lifecycleTrack(id string) desired.Track {

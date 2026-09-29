@@ -49,6 +49,7 @@ type Daemon struct {
 	livenessInterval   time.Duration
 	managedFiles       *managed.Files
 	managedMu          sync.Mutex
+	playlistMu         sync.Mutex
 	selectionKeyOnce   sync.Once
 	selectionKey       [32]byte
 	selectionKeyErr    error
@@ -307,9 +308,7 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 		d.Logger.Info("recovered stale control socket", "path", SocketPath(d.socketDir))
 	}
 
-	d.managedMu.Lock()
-	reconcileErr := d.materializePlaylistsLocked(ctx)
-	d.managedMu.Unlock()
+	reconcileErr := d.materializePlaylists(ctx)
 	if reconcileErr != nil {
 		if ctx.Err() != nil {
 			return d.shutdown(nil)

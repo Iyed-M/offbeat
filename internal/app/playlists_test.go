@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/Iyed-M/offbeat/internal/desired"
+	"github.com/Iyed-M/offbeat/internal/managed"
 
 	"github.com/coder/websocket"
 )
@@ -206,6 +210,69 @@ func TestChangedSpotifySyncMaterializesPlayableM3U8GoldenDirectory(t *testing.T)
 	goldenDir := filepath.Join("testdata", "playlists", "materialized")
 	assertGoldenDirectory(t, actualDir, goldenDir)
 	assertEveryPlaylistPathReadable(t, actualDir)
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		file := filepath.Join(d.Cfg.Paths.MusicRoot, managed.FixturePath("spotify:track:one"))
+		if output, err := exec.Command("ffmpeg", "-v", "error", "-i", file, "-f", "null", "-").CombinedOutput(); err != nil {
+			t.Fatalf("generated playlist audio cannot be decoded: %v %s", err, output)
+		}
+	}
+}
+
+func TestRenderM3U8SanitizesDisplayAndFallsBackForIncompleteMetadata(t *testing.T) {
+	entries := []desired.Entry{{Kind: desired.EntrySupported, TrackURI: "good"}, {Kind: desired.EntrySupported, TrackURI: "incomplete"}, {Kind: desired.EntrySupported, TrackURI: "no-duration"}, {Kind: desired.EntrySupported, TrackURI: "unknown"}, {Kind: desired.EntryUnsupported, TrackURI: "good"}, {Kind: desired.EntrySupported, TrackURI: "good"}}
+	available := map[string]playlistTrack{
+		"good":       {path: "tracks/good.opus", duration: "1.234", track: desired.Track{Name: "Title\r\n#EXTINF:999,evil\x00", Artists: []desired.NamedURI{{Name: "First\n../escape"}, {Name: "Second\x7fArtist"}}}},
+		"incomplete": {path: "tracks/incomplete.wav", duration: "12", track: desired.Track{Name: "Title", Artists: []desired.NamedURI{{Name: "\r\n"}}}},
+		"no-duration": {path: "tracks/no-duration.flac", track: desired.Track{Name: "Title", Artists: []desired.NamedURI{{Name: "First"}}}},
+	}
+	want := "#EXTM3U\n#EXTINF:1.234,First ../escape, Second Artist - Title #EXTINF:999,evil\n../tracks/good.opus\n../tracks/incomplete.wav\n../tracks/no-duration.flac\n#EXTINF:1.234,First ../escape, Second Artist - Title #EXTINF:999,evil\n../tracks/good.opus\n"
+	if got := string(renderM3U8(entries, available)); got != want {
+		t.Fatalf("rendered playlist = %q, want %q", got, want)
+	}
+}
+
+func TestPlaylistProjectionFallsBackWhenAudioDurationOrCommittedDisplayIsMissing(t *testing.T) {
+	d := startAdapterDaemon(t)
+	adapter := authenticateAdapter(t, AdapterEndpoint(d.Cfg.SpotifyAdapter.BindAddress, d.Cfg.SpotifyAdapter.Port))
+	syncEmptyPlaylists(t, d, adapter, []map[string]any{{
+		"uri": "spotify:playlist:one", "name": "One", "entries": []any{map[string]any{
+			"position": 0, "kind": "supported", "track": map[string]any{
+				"uri": "spotify:track:one", "name": "Title", "artists": []any{map[string]any{"uri": "spotify:artist:one", "name": "First"}},
+				"album": map[string]any{"uri": "spotify:album:one", "name": "Album"}, "duration_ms": 900000,
+			},
+		}},
+	}})
+	uri := "spotify:track:one"
+	path, err := d.managedFiles.PublishSynthetic(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DB.RegisterManagedTrack(context.Background(), uri, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.materializePlaylists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	playlist := filepath.Join(d.Cfg.Paths.MusicRoot, "playlists", "One.m3u8")
+	assertFileBytes(t, playlist, "#EXTM3U\n#EXTINF:0.1,First - Title\n../"+path+"\n")
+
+	// Legacy/corrupt rows can lack display fields even though current Adapter
+	// validation requires them. Never substitute the Spotify duration or labels.
+	if _, err := d.DB.ExecContext(context.Background(), `UPDATE spotify_tracks SET name='' WHERE uri=?`, uri); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.materializePlaylists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertFileBytes(t, playlist, "#EXTM3U\n../"+path+"\n")
+	if _, err := d.DB.ExecContext(context.Background(), `UPDATE spotify_tracks SET name='Title' WHERE uri=?`, uri); err != nil {
+		t.Fatal(err)
+	}
+	d.Cfg.Downloader.FFprobePath = "missing-offbeat-probe"
+	if err := d.materializePlaylists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertFileBytes(t, playlist, "#EXTM3U\n../"+path+"\n")
 }
 
 func writePlaylistCandidate(t *testing.T, conn *websocket.Conn, requestID string, changed bool) {
@@ -302,6 +369,9 @@ func assertEveryPlaylistPathReadable(t *testing.T, playlistsDir string) {
 			t.Fatalf("%s has invalid header", entry.Name())
 		}
 		for _, line := range lines[1:] {
+			if strings.HasPrefix(line, "#EXTINF:") {
+				continue
+			}
 			if strings.Contains(line, `\`) || !strings.HasPrefix(line, "../tracks/") {
 				t.Fatalf("%s has non-portable path %q", entry.Name(), line)
 			}

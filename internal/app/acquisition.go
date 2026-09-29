@@ -356,8 +356,8 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 			fail("could not commit recovered managed audio; retry acquisition")
 			return
 		}
-		d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
 		d.managedMu.Unlock()
+		d.reconcilePlaylistsAfterCommit(ctx, "Managed track")
 		return
 	}
 	d.managedMu.Unlock()
@@ -413,7 +413,13 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		return
 	}
 	d.managedMu.Lock()
-	defer d.managedMu.Unlock()
+	completed := false
+	defer func() {
+		d.managedMu.Unlock()
+		if completed && ctx.Err() == nil {
+			d.reconcilePlaylistsAfterCommit(ctx, "Managed track")
+		}
+	}()
 	if err := d.requireMissingTrack(ctx, work.TrackURI); err != nil {
 		fail("track is no longer desired or missing")
 		return
@@ -486,5 +492,5 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		fail("could not commit managed audio; retry acquisition")
 		return
 	}
-	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
+	completed = true
 }

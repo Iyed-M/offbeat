@@ -4,11 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"os"
+	"os/exec"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -21,25 +28,46 @@ const likedSongsPlaylistFilename = "Liked Songs.m3u8"
 
 const maxPlaylistBasenameBytes = 200
 
-// materializePlaylistsLocked projects current Desired Spotify state and live
-// Managed track availability. The caller holds managedMu so the two database
-// reads and all live file checks describe one serialized application state.
-func (d *Daemon) materializePlaylistsLocked(ctx context.Context) error {
+// materializePlaylists serializes projections. Snapshot the desired state and
+// available mappings under managedMu, then release it before bounded external
+// probes and filesystem reconciliation. Later projections always read fresh state.
+func (d *Daemon) materializePlaylists(ctx context.Context) error {
+	d.playlistMu.Lock()
+	defer d.playlistMu.Unlock()
+	d.managedMu.Lock()
 	state, _, err := d.DB.ReadDesiredSpotifyState(ctx)
 	if err != nil {
+		d.managedMu.Unlock()
 		return fmt.Errorf("read Desired Spotify state: %w", err)
 	}
 	managedTracks, err := d.DB.DesiredManagedTracks(ctx)
 	if err != nil {
+		d.managedMu.Unlock()
 		return fmt.Errorf("read Managed tracks: %w", err)
 	}
-	available := make(map[string]string, len(managedTracks))
+	available := make(map[string]playlistTrack, len(managedTracks))
 	for _, track := range managedTracks {
 		if err := ctx.Err(); err != nil {
+			d.managedMu.Unlock()
 			return err
 		}
 		if d.managedFiles.Available(track.Track.URI, track.RelativePath) {
-			available[track.Track.URI] = track.RelativePath
+			available[track.Track.URI] = playlistTrack{path: track.RelativePath, track: track.Track}
+		}
+	}
+	d.managedMu.Unlock()
+	for uri, item := range available {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !completePlaylistDisplay(item.track) {
+			continue
+		}
+		file, err := d.managedFiles.OpenManaged(uri, item.path)
+		if err == nil {
+			item.duration = probePlaylistDuration(ctx, file, d.Cfg.Downloader.FFprobePath)
+			_ = file.Close()
+			available[uri] = item
 		}
 	}
 
@@ -58,11 +86,9 @@ func (d *Daemon) materializePlaylistsLocked(ctx context.Context) error {
 	return nil
 }
 
-// reconcilePlaylistsAfterCommitLocked keeps an authoritative database commit
-// independent from its derived filesystem projection. Callers already hold
-// managedMu and must invoke this only after the source commit has succeeded.
-func (d *Daemon) reconcilePlaylistsAfterCommitLocked(ctx context.Context, source string) {
-	if err := d.materializePlaylistsLocked(ctx); err != nil {
+// Call only after releasing managedMu so probing cannot block other commits.
+func (d *Daemon) reconcilePlaylistsAfterCommit(ctx context.Context, source string) {
+	if err := d.materializePlaylists(ctx); err != nil {
 		// Filesystem errors can contain user-controlled paths. Keep the durable
 		// failure signal useful without copying those paths into daemon logs.
 		d.Logger.Error("reconcile desktop playlists after " + source + " commit")
@@ -157,18 +183,112 @@ func playlistFilenameCollisionKey(basename string) string {
 	return norm.NFC.String(cases.Fold().String(basename))
 }
 
-func renderM3U8(entries []desired.Entry, available map[string]string) []byte {
+type playlistTrack struct {
+	path     string
+	track    desired.Track
+	duration string
+}
+
+func completePlaylistDisplay(track desired.Track) bool {
+	if !utf8.ValidString(track.Name) || sanitizePlaylistText(track.Name) == "" || len(track.Artists) == 0 {
+		return false
+	}
+	for _, artist := range track.Artists {
+		if !utf8.ValidString(artist.Name) || sanitizePlaylistText(artist.Name) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizePlaylistText(text string) string {
+	var safe strings.Builder
+	space := false
+	for _, r := range text {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.IsSpace(r) {
+			space = safe.Len() > 0
+			continue
+		}
+		if space {
+			safe.WriteByte(' ')
+			space = false
+		}
+		safe.WriteRune(r)
+	}
+	return safe.String()
+}
+
+// Probe the open root-confined descriptor, not its pathname: a replaced path
+// cannot redirect ffprobe. A failed, slow or malformed probe means bare path.
+func probePlaylistDuration(ctx context.Context, file *os.File, ffprobe string) string {
+	if file == nil || ffprobe == "" {
+		return ""
+	}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(bounded, ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", "-i", "/proc/self/fd/3")
+	cmd.ExtraFiles = []*os.File{file}
+	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	var output limitedPlaylistOutput
+	cmd.Stdout = &output
+	if cmd.Run() != nil || bounded.Err() != nil || output.overflow {
+		return ""
+	}
+	var data struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if json.Unmarshal(output.data, &data) != nil {
+		return ""
+	}
+	seconds, err := strconv.ParseFloat(data.Format.Duration, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 || seconds > 24*60*60 {
+		return ""
+	}
+	return strconv.FormatFloat(seconds, 'f', -1, 64)
+}
+
+type limitedPlaylistOutput struct {
+	data     []byte
+	overflow bool
+}
+
+func (o *limitedPlaylistOutput) Write(p []byte) (int, error) {
+	if len(p) > 4096-len(o.data) {
+		o.overflow = true
+	} else {
+		o.data = append(o.data, p...)
+	}
+	return len(p), nil
+}
+
+func renderM3U8(entries []desired.Entry, available map[string]playlistTrack) []byte {
 	var rendered bytes.Buffer
 	rendered.WriteString("#EXTM3U\n")
 	for _, entry := range entries {
 		if entry.Kind != desired.EntrySupported {
 			continue
 		}
-		relativePath, ok := available[entry.TrackURI]
+		item, ok := available[entry.TrackURI]
 		if !ok {
 			continue
 		}
-		rendered.WriteString(path.Join("..", relativePath))
+		if item.duration != "" && completePlaylistDisplay(item.track) {
+			artists := make([]string, 0, len(item.track.Artists))
+			for _, artist := range item.track.Artists {
+				artists = append(artists, sanitizePlaylistText(artist.Name))
+			}
+			rendered.WriteString("#EXTINF:" + item.duration + "," + strings.Join(artists, ", ") + " - " + sanitizePlaylistText(item.track.Name) + "\n")
+		}
+		rendered.WriteString(path.Join("..", item.path))
 		rendered.WriteByte('\n')
 	}
 	return rendered.Bytes()

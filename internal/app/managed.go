@@ -79,7 +79,13 @@ func (d *Daemon) RegisterSyntheticTrackFixture(ctx context.Context, uri string) 
 		return "", fmt.Errorf("synthetic track fixtures are disabled")
 	}
 	d.managedMu.Lock()
-	defer d.managedMu.Unlock()
+	registered := false
+	defer func() {
+		d.managedMu.Unlock()
+		if registered && ctx.Err() == nil {
+			d.reconcilePlaylistsAfterCommit(ctx, "Managed track")
+		}
+	}()
 	if d.DB == nil || d.managedFiles == nil {
 		return "", fmt.Errorf("managed library not ready")
 	}
@@ -97,6 +103,6 @@ func (d *Daemon) RegisterSyntheticTrackFixture(ctx context.Context, uri string) 
 	if err := d.DB.RegisterManagedTrack(ctx, uri, path); err != nil {
 		return "", err
 	}
-	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
+	registered = true
 	return path, nil
 }
