@@ -7,12 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Iyed-M/offbeat/internal/desired"
-	"github.com/Iyed-M/offbeat/internal/managed"
-
 	"github.com/coder/websocket"
 )
 
@@ -210,19 +210,166 @@ func TestChangedSpotifySyncMaterializesPlayableM3U8GoldenDirectory(t *testing.T)
 	goldenDir := filepath.Join("testdata", "playlists", "materialized")
 	assertGoldenDirectory(t, actualDir, goldenDir)
 	assertEveryPlaylistPathReadable(t, actualDir)
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		file := filepath.Join(d.Cfg.Paths.MusicRoot, managed.FixturePath("spotify:track:one"))
-		if output, err := exec.Command("ffmpeg", "-v", "error", "-i", file, "-f", "null", "-").CombinedOutput(); err != nil {
-			t.Fatalf("generated playlist audio cannot be decoded: %v %s", err, output)
+	assertPlayableExtendedPlaylist(t, filepath.Join(actualDir, likedSongsPlaylistFilename))
+}
+
+// Consume the generated M3U8 as paired EXTINF/path records, resolve paths
+// relative to the playlist, and independently probe/decode their audio.
+func assertPlayableExtendedPlaylist(t *testing.T, name string) {
+	t.Helper()
+	content, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(content), "\n"), "\n")
+	if len(lines) < 3 || lines[0] != "#EXTM3U" || (len(lines)-1)%2 != 0 {
+		t.Fatalf("invalid extended playlist: %q", content)
+	}
+	for i := 1; i < len(lines); i += 2 {
+		meta, relative := lines[i], lines[i+1]
+		if !strings.HasPrefix(meta, "#EXTINF:") || !strings.HasPrefix(relative, "../tracks/") {
+			t.Fatalf("invalid EXTINF/path pair: %q %q", meta, relative)
 		}
+		fields := strings.SplitN(strings.TrimPrefix(meta, "#EXTINF:"), ",", 2)
+		if len(fields) != 2 || !strings.Contains(fields[1], " - ") {
+			t.Fatalf("invalid display text: %q", meta)
+		}
+		seconds, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil || seconds <= 0 {
+			t.Fatalf("invalid duration: %q", meta)
+		}
+		resolved := filepath.Join(filepath.Dir(name), filepath.FromSlash(relative))
+		probe, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", resolved).Output()
+		if err != nil {
+			t.Fatalf("playlist audio probe: %v", err)
+		}
+		actual, err := strconv.ParseFloat(strings.TrimSpace(string(probe)), 64)
+		if err != nil || actual != seconds {
+			t.Fatalf("playlist duration %v differs from resolved audio %q: %v", seconds, probe, err)
+		}
+		if _, err := exec.LookPath("ffmpeg"); err == nil {
+			if output, err := exec.Command("ffmpeg", "-v", "error", "-i", resolved, "-f", "null", "-").CombinedOutput(); err != nil {
+				t.Fatalf("playlist audio cannot be decoded: %v %s", err, output)
+			}
+		}
+	}
+}
+
+func TestFormatPlaylistDurationAcceptsPositiveFiniteAudioBeyondOneDay(t *testing.T) {
+	for input, want := range map[string]string{"0.100000": "0.1", "86400.000000": "86400", "90061.250000": "90061.25", "0": "", "-1": "", "NaN": "", "+Inf": "", "invalid": ""} {
+		if got := formatPlaylistDuration(input); got != want {
+			t.Errorf("formatPlaylistDuration(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestPlaylistRechecksLiveAvailabilityAndStateAfterProbe(t *testing.T) {
+	for _, change := range []string{"removed", "replaced", "symlink", "new state", "new title"} {
+		t.Run(change, func(t *testing.T) {
+			d, err := NewDaemon(context.Background(), Options{HomeDir: t.TempDir(), AdapterCredential: testAdapterCredential})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			track := lifecycleTrack("racing")
+			candidate := desired.Candidate{LikedSongs: []desired.CandidateEntry{{Kind: desired.EntrySupported, Track: &track}}}
+			if _, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), candidate); err != nil {
+				t.Fatal(err)
+			}
+			path, err := d.managedFiles.PublishSynthetic(track.URI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.DB.RegisterManagedTrack(context.Background(), track.URI, path); err != nil {
+				t.Fatal(err)
+			}
+			started, release := filepath.Join(t.TempDir(), "started"), filepath.Join(t.TempDir(), "release")
+			probe := filepath.Join(t.TempDir(), "blocking-probe")
+			script := "#!/bin/sh\n: > " + strconv.Quote(started) + "\nwhile [ ! -e " + strconv.Quote(release) + " ]; do sleep 0.01; done\nprintf '{\"format\":{\"duration\":\"0.100000\"}}\\n'\n"
+			if err := os.WriteFile(probe, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			d.Cfg.Downloader.FFprobePath = probe
+			done := make(chan error, 1)
+			go func() { done <- d.materializePlaylists(context.Background()) }()
+			deadline := time.After(3 * time.Second)
+			for {
+				if _, err := os.Stat(started); err == nil {
+					break
+				}
+				select {
+				case <-deadline:
+					t.Fatal("probe did not start")
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			// A state commit must not wait for the external probe's broad lock.
+			committed := make(chan error, 1)
+			go func() {
+				d.managedMu.Lock()
+				defer d.managedMu.Unlock()
+				if change == "new state" || change == "new title" {
+					if change == "new state" {
+						candidate.LikedSongs = nil
+					} else {
+						updated := track
+						updated.Name = "Current title"
+						candidate.LikedSongs[0].Track = &updated
+					}
+					_, _, _, err := d.DB.ApplyDesiredSpotifyState(context.Background(), candidate)
+					committed <- err
+					return
+				}
+				err := os.Remove(filepath.Join(d.Cfg.Paths.MusicRoot, path))
+				if err == nil && change == "replaced" {
+					_, err = d.managedFiles.PublishSynthetic(track.URI)
+					if err == nil {
+						file, openErr := os.OpenFile(filepath.Join(d.Cfg.Paths.MusicRoot, path), os.O_APPEND|os.O_WRONLY, 0)
+						if openErr != nil {
+							err = openErr
+						} else {
+							_, err = file.Write([]byte{0})
+							_ = file.Close()
+						}
+					}
+				}
+				if err == nil && change == "symlink" {
+					outside := filepath.Join(t.TempDir(), "outside.wav")
+					if err = os.WriteFile(outside, []byte("outside"), 0o600); err == nil {
+						err = os.Symlink(outside, filepath.Join(d.Cfg.Paths.MusicRoot, path))
+					}
+				}
+				committed <- err
+			}()
+			select {
+			case err := <-committed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("state change blocked by probe")
+			}
+			if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			want := "#EXTM3U\n"
+			if change == "new title" {
+				want += "#EXTINF:0.1,Artist - Current title\n../" + path + "\n"
+			}
+			assertFileBytes(t, filepath.Join(d.Cfg.Paths.MusicRoot, "playlists", likedSongsPlaylistFilename), want)
+		})
 	}
 }
 
 func TestRenderM3U8SanitizesDisplayAndFallsBackForIncompleteMetadata(t *testing.T) {
 	entries := []desired.Entry{{Kind: desired.EntrySupported, TrackURI: "good"}, {Kind: desired.EntrySupported, TrackURI: "incomplete"}, {Kind: desired.EntrySupported, TrackURI: "no-duration"}, {Kind: desired.EntrySupported, TrackURI: "unknown"}, {Kind: desired.EntryUnsupported, TrackURI: "good"}, {Kind: desired.EntrySupported, TrackURI: "good"}}
 	available := map[string]playlistTrack{
-		"good":       {path: "tracks/good.opus", duration: "1.234", track: desired.Track{Name: "Title\r\n#EXTINF:999,evil\x00", Artists: []desired.NamedURI{{Name: "First\n../escape"}, {Name: "Second\x7fArtist"}}}},
-		"incomplete": {path: "tracks/incomplete.wav", duration: "12", track: desired.Track{Name: "Title", Artists: []desired.NamedURI{{Name: "\r\n"}}}},
+		"good":        {path: "tracks/good.opus", duration: "1.234", track: desired.Track{Name: "Title\r\n#EXTINF:999,evil\x00", Artists: []desired.NamedURI{{Name: "First\n../escape"}, {Name: "Second\x7fArtist"}}}},
+		"incomplete":  {path: "tracks/incomplete.wav", duration: "12", track: desired.Track{Name: "Title", Artists: []desired.NamedURI{{Name: "\r\n"}}}},
 		"no-duration": {path: "tracks/no-duration.flac", track: desired.Track{Name: "Title", Artists: []desired.NamedURI{{Name: "First"}}}},
 	}
 	want := "#EXTM3U\n#EXTINF:1.234,First ../escape, Second Artist - Title #EXTINF:999,evil\n../tracks/good.opus\n../tracks/incomplete.wav\n../tracks/no-duration.flac\n#EXTINF:1.234,First ../escape, Second Artist - Title #EXTINF:999,evil\n../tracks/good.opus\n"

@@ -28,47 +28,77 @@ const likedSongsPlaylistFilename = "Liked Songs.m3u8"
 
 const maxPlaylistBasenameBytes = 200
 
-// materializePlaylists serializes projections. Snapshot the desired state and
-// available mappings under managedMu, then release it before bounded external
-// probes and filesystem reconciliation. Later projections always read fresh state.
+// materializePlaylists serializes projections. Probe a snapshot without holding
+// managedMu, then read current state and recheck root-confined live files under
+// managedMu through publication. A concurrent commit cannot publish a stale
+// projection after its own reconciliation.
 func (d *Daemon) materializePlaylists(ctx context.Context) error {
 	d.playlistMu.Lock()
 	defer d.playlistMu.Unlock()
 	d.managedMu.Lock()
-	state, _, err := d.DB.ReadDesiredSpotifyState(ctx)
-	if err != nil {
-		d.managedMu.Unlock()
-		return fmt.Errorf("read Desired Spotify state: %w", err)
-	}
 	managedTracks, err := d.DB.DesiredManagedTracks(ctx)
 	if err != nil {
 		d.managedMu.Unlock()
 		return fmt.Errorf("read Managed tracks: %w", err)
 	}
-	available := make(map[string]playlistTrack, len(managedTracks))
+	snapshot := make(map[string]playlistTrack, len(managedTracks))
 	for _, track := range managedTracks {
 		if err := ctx.Err(); err != nil {
 			d.managedMu.Unlock()
 			return err
 		}
 		if d.managedFiles.Available(track.Track.URI, track.RelativePath) {
-			available[track.Track.URI] = playlistTrack{path: track.RelativePath, track: track.Track}
+			snapshot[track.Track.URI] = playlistTrack{path: track.RelativePath, track: track.Track}
 		}
 	}
 	d.managedMu.Unlock()
-	for uri, item := range available {
+	for uri, item := range snapshot {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !completePlaylistDisplay(item.track) {
-			continue
-		}
 		file, err := d.managedFiles.OpenManaged(uri, item.path)
 		if err == nil {
-			item.duration = probePlaylistDuration(ctx, file, d.Cfg.Downloader.FFprobePath)
+			item.info, err = file.Stat()
+			if err == nil && completePlaylistDisplay(item.track) {
+				item.duration = probePlaylistDuration(ctx, file, d.Cfg.Downloader.FFprobePath)
+			}
 			_ = file.Close()
-			available[uri] = item
+			snapshot[uri] = item
 		}
+	}
+	d.managedMu.Lock()
+	defer d.managedMu.Unlock()
+	state, _, err := d.DB.ReadDesiredSpotifyState(ctx)
+	if err != nil {
+		return fmt.Errorf("read Desired Spotify state: %w", err)
+	}
+	managedTracks, err = d.DB.DesiredManagedTracks(ctx)
+	if err != nil {
+		return fmt.Errorf("read Managed tracks: %w", err)
+	}
+	available := make(map[string]playlistTrack, len(managedTracks))
+	for _, current := range managedTracks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		uri, name := current.Track.URI, current.RelativePath
+		if !d.managedFiles.Available(uri, name) {
+			continue
+		}
+		item := playlistTrack{path: name, track: current.Track}
+		if probed, ok := snapshot[uri]; ok && probed.path == name && probed.info != nil {
+			file, err := d.managedFiles.OpenManaged(uri, name)
+			if err != nil {
+				continue
+			}
+			live, err := file.Stat()
+			_ = file.Close()
+			if err != nil || !os.SameFile(probed.info, live) || probed.info.Size() != live.Size() || !probed.info.ModTime().Equal(live.ModTime()) {
+				continue // changed since the probe; let a later reconciliation retry
+			}
+			item.duration = probed.duration
+		}
+		available[uri] = item
 	}
 
 	desiredPlaylists := make(map[string][]byte, len(state.Playlists)+1)
@@ -187,6 +217,7 @@ type playlistTrack struct {
 	path     string
 	track    desired.Track
 	duration string
+	info     os.FileInfo
 }
 
 func completePlaylistDisplay(track desired.Track) bool {
@@ -249,8 +280,12 @@ func probePlaylistDuration(ctx context.Context, file *os.File, ffprobe string) s
 	if json.Unmarshal(output.data, &data) != nil {
 		return ""
 	}
-	seconds, err := strconv.ParseFloat(data.Format.Duration, 64)
-	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 || seconds > 24*60*60 {
+	return formatPlaylistDuration(data.Format.Duration)
+}
+
+func formatPlaylistDuration(value string) string {
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
 		return ""
 	}
 	return strconv.FormatFloat(seconds, 'f', -1, 64)
