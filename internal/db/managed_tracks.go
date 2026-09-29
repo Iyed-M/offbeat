@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,8 +11,23 @@ import (
 )
 
 type ManagedTrack struct {
-	Track        desired.Track
-	RelativePath string
+	Track              desired.Track
+	RelativePath       string
+	TagState           string
+	ArtworkState       string
+	TagFingerprint     string
+	ArtworkFingerprint string
+	FileSHA256         string
+	RefreshIntent      string
+}
+
+func PresentationFingerprint(track desired.Track) (string, string) {
+	artists := make([]string, 0, len(track.Artists))
+	for _, artist := range track.Artists {
+		artists = append(artists, artist.Name)
+	}
+	text, _ := json.Marshal([]any{track.URI, track.Name, artists, track.Album.Name, track.AlbumArtist, track.TrackNumber, track.DiscNumber, track.ReleaseDate})
+	return fmt.Sprintf("%x", sha256.Sum256(text)), fmt.Sprintf("%x", sha256.Sum256([]byte(track.ArtworkURL)))
 }
 
 // DesiredManagedTracks returns only distinct currently desired supported tracks,
@@ -44,7 +60,7 @@ func (d *DB) DesiredManagedTrackPage(ctx context.Context, after string, limit in
 }
 
 func readManagedTracks(ctx context.Context, q stateQuerier, after string, limit int) ([]ManagedTrack, error) {
-	rows, err := q.QueryContext(ctx, `SELECT `+spotifyTrackColumns+`, COALESCE(m.relative_path, '') FROM spotify_tracks s LEFT JOIN managed_tracks m ON m.track_uri = s.uri WHERE s.uri > ? ORDER BY s.uri LIMIT ?`, after, limit)
+	rows, err := q.QueryContext(ctx, `SELECT `+spotifyTrackColumns+`, COALESCE(m.relative_path, ''), COALESCE(m.tag_state, 'pending'), COALESCE(m.artwork_state, 'pending'), COALESCE(m.tag_fingerprint, ''), COALESCE(m.artwork_fingerprint, ''), COALESCE(m.file_sha256, ''), COALESCE(m.refresh_intent, '') FROM spotify_tracks s LEFT JOIN managed_tracks m ON m.track_uri = s.uri WHERE s.uri > ? ORDER BY s.uri LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query desired managed tracks: %w", err)
 	}
@@ -55,7 +71,7 @@ func readManagedTracks(ctx context.Context, q stateQuerier, after string, limit 
 		var artists string
 		var albumArtist, releaseDate, artworkURL sql.NullString
 		var trackNumber, discNumber sql.NullInt64
-		if err := rows.Scan(&item.Track.URI, &item.Track.Name, &artists, &item.Track.Album.URI, &item.Track.Album.Name, &item.Track.DurationMS, &albumArtist, &trackNumber, &discNumber, &releaseDate, &artworkURL, &item.RelativePath); err != nil {
+		if err := rows.Scan(&item.Track.URI, &item.Track.Name, &artists, &item.Track.Album.URI, &item.Track.Album.Name, &item.Track.DurationMS, &albumArtist, &trackNumber, &discNumber, &releaseDate, &artworkURL, &item.RelativePath, &item.TagState, &item.ArtworkState, &item.TagFingerprint, &item.ArtworkFingerprint, &item.FileSHA256, &item.RefreshIntent); err != nil {
 			return nil, err
 		}
 		setPresentation(&item.Track, albumArtist, trackNumber, discNumber, releaseDate, artworkURL)

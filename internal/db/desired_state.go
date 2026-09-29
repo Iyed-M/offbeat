@@ -135,6 +135,20 @@ func upsertTracks(ctx context.Context, tx *sql.Tx, current, wanted []desired.Tra
 		if existing, ok := known[track.URI]; ok && reflect.DeepEqual(existing, track) {
 			continue
 		}
+		if existing, ok := known[track.URI]; ok {
+			oldText, oldArt := PresentationFingerprint(existing)
+			newText, newArt := PresentationFingerprint(track)
+			if oldText != newText {
+				if _, err := tx.ExecContext(ctx, `UPDATE managed_tracks SET tag_state='pending', tag_error='' WHERE track_uri=?`, track.URI); err != nil {
+					return fmt.Errorf("mark stale text tags: %w", err)
+				}
+			}
+			if oldArt != newArt {
+				if _, err := tx.ExecContext(ctx, `UPDATE managed_tracks SET artwork_state='pending', artwork_error='' WHERE track_uri=?`, track.URI); err != nil {
+					return fmt.Errorf("mark stale artwork: %w", err)
+				}
+			}
+		}
 		artists, err := json.Marshal(track.Artists)
 		if err != nil {
 			return fmt.Errorf("encode track artists: %w", err)

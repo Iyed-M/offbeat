@@ -55,6 +55,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runSpotifySync(configPath, homeDir))
+	case "metadata":
+		if len(rest) != 1 || rest[0] != "refresh" {
+			fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat metadata refresh")
+			os.Exit(2)
+		}
+		os.Exit(runMetadataRefresh(configPath, homeDir))
 	case "missing":
 		if len(rest) > 0 {
 			fmt.Fprintln(os.Stderr, "offbeat: 'missing' takes no arguments")
@@ -125,6 +131,7 @@ func printHelp() {
 	fmt.Println("  status    report daemon/database status through the control socket")
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
+	fmt.Println("  metadata refresh  apply current Spotify tags and artwork to available tracks")
 	fmt.Println("  missing       list supported desired tracks without a managed file")
 	fmt.Println("  acquire       request, inspect, retry or map authorized media acquisition")
 	fmt.Println("  review        browse unresolved YouTube work in a temporary local page")

@@ -35,6 +35,11 @@ def write(path, extension, data, picture=None, mime=None):
         for key in ("albumartist", "tracknumber", "discnumber", "date"):
             if key not in fields and key in audio:
                 del audio[key]
+        if data.get("clear_picture"):
+            if extension == "flac":
+                audio.clear_pictures()
+            else:
+                audio.pop("metadata_block_picture", None)
         if picture is not None:
             cover = Picture()
             cover.type = 3
@@ -66,6 +71,8 @@ def write(path, extension, data, picture=None, mime=None):
                                 (data["release_date"], "TDRC")):
             if not value:
                 tags.delall(frame_id)
+        if data.get("clear_picture"):
+            tags.delall("APIC")
         if picture is not None:
             tags.delall("APIC")
             tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=picture))
@@ -86,6 +93,8 @@ def write(path, extension, data, picture=None, mime=None):
         for key in ("aART", "trkn", "disk", "\xa9day"):
             if key not in fields and key in audio:
                 del audio[key]
+        if data.get("clear_picture"):
+            audio.pop("covr", None)
         if picture is not None:
             audio["covr"] = [MP4Cover(picture, imageformat=MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG)]
         audio.save()

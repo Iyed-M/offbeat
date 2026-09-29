@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 type Files struct {
@@ -313,6 +316,199 @@ func (f *Files) Available(uri, path string) bool {
 	var first [1]byte
 	n, err := file.Read(first[:])
 	return err == nil && n == 1
+}
+
+// OpenManaged confines an existing mapping to its canonical regular file.
+func (f *Files) OpenManaged(uri, name string) (*os.File, error) {
+	if !canonicalTrackPath(uri, name) || f.checkDir("tracks") != nil {
+		return nil, fmt.Errorf("invalid managed track mapping")
+	}
+	file, err := f.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 512<<20 {
+		_ = file.Close()
+		return nil, fmt.Errorf("managed file is not a bounded regular file")
+	}
+	return file, nil
+}
+
+// Digest reads a bounded open descriptor without trusting its pathname.
+func Digest(ctx context.Context, file *os.File) (string, error) {
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 512<<20 {
+		return "", fmt.Errorf("invalid managed audio")
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, &contextReader{ctx: ctx, source: io.NewSectionReader(file, 0, info.Size())})
+	if err != nil || n != info.Size() {
+		return "", fmt.Errorf("could not hash managed audio")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ReplaceManaged stages verified media under the root, then exchanges it with
+// the destination. The displaced file remains available for an identity and
+// digest check; a concurrently replaced destination is exchanged back.
+func (f *Files) ReplaceManaged(ctx context.Context, uri, name, staged string, original, replacement *os.File, expectedSHA, replacementSHA string) error {
+	if !canonicalTrackPath(uri, name) || !validRefreshTemporary(staged) || f.checkDir("tracks") != nil || original == nil || replacement == nil {
+		return fmt.Errorf("invalid managed replacement")
+	}
+	output, err := f.root.OpenFile(staged, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = f.root.Remove(staged)
+		}
+	}()
+	if _, err = replacement.Seek(0, io.SeekStart); err == nil {
+		_, err = io.Copy(output, &contextReader{ctx: ctx, source: replacement})
+	}
+	if err == nil {
+		err = output.Sync()
+	}
+	closeErr := output.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	stagedFile, err := f.root.OpenFile(staged, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	stagedSHA, digestErr := Digest(ctx, stagedFile)
+	closeErr = stagedFile.Close()
+	if digestErr != nil || closeErr != nil || stagedSHA != replacementSHA {
+		return fmt.Errorf("staged managed audio changed during copy")
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	current, err := f.OpenManaged(uri, name)
+	if err != nil {
+		return fmt.Errorf("managed destination changed: %w", err)
+	}
+	defer current.Close()
+	before, err := original.Stat()
+	if err != nil {
+		return err
+	}
+	actual, err := current.Stat()
+	if err != nil || !os.SameFile(before, actual) || before.Size() != actual.Size() || before.ModTime() != actual.ModTime() {
+		return fmt.Errorf("managed destination changed")
+	}
+	sha, err := Digest(ctx, current)
+	if err != nil || sha != expectedSHA {
+		return fmt.Errorf("managed destination changed")
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	dir, err := f.root.Open("tracks")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	// The exchange is atomic, so a concurrent writer between the final check
+	// and publication is still detected on the displaced entry.
+	if err := unix.Renameat2(int(dir.Fd()), path.Base(staged), int(dir.Fd()), path.Base(name), unix.RENAME_EXCHANGE); err != nil {
+		return fmt.Errorf("exchange managed audio: %w", err)
+	}
+	old, err := f.root.OpenFile(staged, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err == nil {
+		var oldInfo os.FileInfo
+		oldInfo, err = old.Stat()
+		if err == nil && (!oldInfo.Mode().IsRegular() || !os.SameFile(before, oldInfo)) {
+			err = fmt.Errorf("managed destination changed")
+		}
+		if err == nil {
+			var oldSHA string
+			oldSHA, err = Digest(ctx, old)
+			if err == nil && oldSHA != expectedSHA {
+				err = fmt.Errorf("managed destination changed")
+			}
+		}
+		_ = old.Close()
+	}
+	if err != nil {
+		if rollbackErr := unix.Renameat2(int(dir.Fd()), path.Base(staged), int(dir.Fd()), path.Base(name), unix.RENAME_EXCHANGE); rollbackErr != nil {
+			cleanup = false // preserve the displaced good file for manual recovery
+			return fmt.Errorf("managed destination changed; could not restore displaced file: %w", rollbackErr)
+		}
+		return fmt.Errorf("managed destination changed: %w", err)
+	}
+	syncErr := dir.Sync()
+	if syncErr != nil {
+		if rollbackErr := unix.Renameat2(int(dir.Fd()), path.Base(staged), int(dir.Fd()), path.Base(name), unix.RENAME_EXCHANGE); rollbackErr != nil {
+			cleanup = false
+			return fmt.Errorf("sync managed directory failed and restore failed: %w", rollbackErr)
+		}
+		return syncErr
+	}
+	return nil
+}
+
+// NewRefreshTemporary generates the root-relative name persisted in the DB
+// intent before an exchange. It can be inspected after an interrupted daemon.
+func NewRefreshTemporary() string { return "tracks/.publish-" + rand.Text() }
+
+func validRefreshTemporary(name string) bool {
+	return strings.HasPrefix(name, "tracks/.publish-") && len(name) == len("tracks/.publish-")+26 && path.Base(name) == strings.TrimPrefix(name, "tracks/")
+}
+
+// ReconcileReplacement checks the displaced file if an exchange was
+// interrupted. If another valid file was displaced, restore it rather than
+// accepting the newly published bytes as an authorized replacement.
+func (f *Files) ReconcileReplacement(ctx context.Context, uri, name, temporary, previousSHA string) error {
+	if !canonicalTrackPath(uri, name) || !validRefreshTemporary(temporary) || f.checkDir("tracks") != nil {
+		return fmt.Errorf("invalid pending replacement")
+	}
+	old, err := f.root.OpenFile(temporary, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if os.IsNotExist(err) {
+		return nil
+	} // verified publication removed the displaced copy
+	if err != nil {
+		return fmt.Errorf("pending displaced file cannot be opened safely")
+	}
+	defer old.Close()
+	sha, err := Digest(ctx, old)
+	if err != nil {
+		return fmt.Errorf("pending displaced file cannot be inspected safely")
+	}
+	if sha != previousSHA {
+		// The caller has already checked that the current destination is exactly
+		// the staged digest, so restoration cannot overwrite a third-party edit.
+		if err := f.root.Rename(temporary, name); err != nil {
+			return fmt.Errorf("could not restore changed managed file: %w", err)
+		}
+		dir, err := f.root.Open("tracks")
+		if err != nil {
+			return err
+		}
+		err = dir.Sync()
+		_ = dir.Close()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("managed destination changed during interrupted replacement; original restored")
+	}
+	if err := f.root.Remove(temporary); err != nil {
+		return err
+	}
+	dir, err := f.root.Open("tracks")
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }
 
 // OpenOrphan opens the sole identity-derived track file, if one exists, via

@@ -473,7 +473,7 @@ func (d *DB) CompletePresentedAcquisition(ctx context.Context, id int64, relativ
 	if err := requireDesiredTrack(ctx, tx, work.TrackURI); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error, artwork_state, artwork_error) SELECT uri, ?, ?, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error, artwork_state = excluded.artwork_state, artwork_error = excluded.artwork_error`, relativePath, tagState, tagError, artworkState, artworkError, work.TrackURI)
+	result, err := tx.ExecContext(ctx, `INSERT INTO managed_tracks(track_uri, relative_path, tag_state, tag_error, artwork_state, artwork_error) SELECT uri, ?, ?, ?, ?, ? FROM spotify_tracks WHERE uri = ? ON CONFLICT(track_uri) DO UPDATE SET relative_path = excluded.relative_path, tag_state = excluded.tag_state, tag_error = excluded.tag_error, artwork_state = excluded.artwork_state, artwork_error = excluded.artwork_error, tag_fingerprint='', artwork_fingerprint='', file_sha256='', refresh_intent=''`, relativePath, tagState, tagError, artworkState, artworkError, work.TrackURI)
 	if err != nil {
 		return fmt.Errorf("register acquired managed track: %w", err)
 	}

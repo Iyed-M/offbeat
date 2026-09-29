@@ -14,6 +14,91 @@ import (
 	"github.com/Iyed-M/offbeat/internal/managed"
 )
 
+func TestReplaceManagedRejectsCancellationAndChangedDestination(t *testing.T) {
+	root := t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	uri := "spotify:track:one"
+	source := filepath.Join(t.TempDir(), "audio.flac")
+	if err := os.WriteFile(source, []byte("original audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, _ := os.Open(source)
+	name, err := files.PublishNew(context.Background(), uri, input, "flac")
+	input.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := files.OpenManaged(uri, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	sha, err := managed.Digest(context.Background(), original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("replacement audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	replacementSHA, err := managed.Digest(context.Background(), replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := files.ReplaceManaged(ctx, uri, name, managed.NewRefreshTemporary(), original, replacement, sha, replacementSHA); err == nil {
+		t.Fatal("canceled replacement succeeded")
+	}
+	changed := filepath.Join(root, "tracks", ".changed")
+	if err := os.WriteFile(changed, []byte("changed valid audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(changed, filepath.Join(root, name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.ReplaceManaged(context.Background(), uri, name, managed.NewRefreshTemporary(), original, replacement, sha, replacementSHA); err == nil {
+		t.Fatal("changed managed file was clobbered")
+	}
+	got, err := os.ReadFile(filepath.Join(root, name))
+	if err != nil || string(got) != "changed valid audio" {
+		t.Fatalf("changed audio lost: %s %v", got, err)
+	}
+}
+
+func TestReconcileReplacementRestoresDisplacedChangedAudio(t *testing.T) {
+	root := t.TempDir()
+	files, err := managed.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	uri := "spotify:track:one"
+	name := managed.TrackPath(uri, "flac")
+	temporary := managed.NewRefreshTemporary()
+	if err := os.WriteFile(filepath.Join(root, name), []byte("new tagged audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, temporary), []byte("externally changed audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.ReconcileReplacement(context.Background(), uri, name, temporary, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("unexpected displaced audio accepted")
+	}
+	got, err := os.ReadFile(filepath.Join(root, name))
+	if err != nil || string(got) != "externally changed audio" {
+		t.Fatalf("displaced audio not restored: %s %v", got, err)
+	}
+}
+
 func TestManagedFilesRejectInvalidFiles(t *testing.T) {
 	for _, kind := range []string{"absent", "empty", "unreadable", "directory", "fifo", "symlink"} {
 		t.Run(kind, func(t *testing.T) {

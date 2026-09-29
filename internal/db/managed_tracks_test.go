@@ -35,7 +35,7 @@ func TestManagedMappingConstraintsAndRetention(t *testing.T) {
 	if _, err := d.ExecContext(ctx, `UPDATE state_metadata SET revision = 1 WHERE singleton_id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{3, 4, 5, 6, 7, 8, 9, 10}) {
+	if applied, err := d.Migrate(ctx, nil, ""); err != nil || !reflect.DeepEqual(applied, []int{3, 4, 5, 6, 7, 8, 9, 10, 11}) {
 		t.Fatalf("M4 upgrade = %v %v", applied, err)
 	}
 	_, before, err := d.ReadDesiredSpotifyState(ctx)

@@ -461,6 +461,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleConfig(ctx)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
+	case "metadata.refresh":
+		return d.handleMetadataRefresh(ctx)
 	case "acquire", "acquire.missing", "acquire.status", "acquire.retry", "acquire.retry.unresolved":
 		return d.handleAcquisition(ctx, req)
 	case "acquire.inspect":

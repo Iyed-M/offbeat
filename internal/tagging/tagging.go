@@ -59,6 +59,16 @@ func Stage(ctx context.Context, source *os.File, extension string, track desired
 
 // StageWithArtwork uses the existing native writer and decoded-audio verification.
 func StageWithArtwork(ctx context.Context, source *os.File, extension string, track desired.Track, ffmpeg, ffprobe string, picture *artwork.Image) Result {
+	return stage(ctx, source, extension, track, ffmpeg, ffprobe, picture, false)
+}
+
+// StageRefresh clears obsolete native cover art only when the current Desired
+// Spotify state has no artwork URL. Ordinary text-only writes preserve it.
+func StageRefresh(ctx context.Context, source *os.File, extension string, track desired.Track, ffmpeg, ffprobe string, picture *artwork.Image, clearPicture bool) Result {
+	return stage(ctx, source, extension, track, ffmpeg, ffprobe, picture, clearPicture)
+}
+
+func stage(ctx context.Context, source *os.File, extension string, track desired.Track, ffmpeg, ffprobe string, picture *artwork.Image, clearPicture bool) Result {
 	if extension == "wav" || extension == "aac" {
 		return Result{State: Unsupported, Error: "native text tags unavailable for format"}
 	}
@@ -106,7 +116,7 @@ func StageWithArtwork(ctx context.Context, source *os.File, extension string, tr
 		artists = append(artists, artist.Name)
 	}
 	// Use explicit snake_case names for the private JSON protocol.
-	payload, _ := json.Marshal(map[string]any{"title": track.Name, "album": track.Album.Name, "uri": track.URI, "artists": artists, "album_artist": track.AlbumArtist, "track_number": track.TrackNumber, "disc_number": track.DiscNumber, "release_date": track.ReleaseDate})
+	payload, _ := json.Marshal(map[string]any{"title": track.Name, "album": track.Album.Name, "uri": track.URI, "artists": artists, "album_artist": track.AlbumArtist, "track_number": track.TrackNumber, "disc_number": track.DiscNumber, "release_date": track.ReleaseDate, "clear_picture": clearPicture})
 	if len(payload) > 128<<10 {
 		return failure("tag metadata exceeds limit")
 	}
