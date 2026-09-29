@@ -117,12 +117,14 @@ func (d *Daemon) materializePlaylists(ctx context.Context) error {
 }
 
 // Call only after releasing managedMu so probing cannot block other commits.
-func (d *Daemon) reconcilePlaylistsAfterCommit(ctx context.Context, source string) {
+func (d *Daemon) reconcilePlaylistsAfterCommit(ctx context.Context, source string) bool {
 	if err := d.materializePlaylists(ctx); err != nil {
 		// Filesystem errors can contain user-controlled paths. Keep the durable
 		// failure signal useful without copying those paths into daemon logs.
 		d.Logger.Error("reconcile desktop playlists after " + source + " commit")
+		return false
 	}
+	return true
 }
 
 func playlistFilenames(playlists []desired.Playlist) []string {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
@@ -60,6 +61,8 @@ type Daemon struct {
 	acquisitionCancel  context.CancelFunc
 	acquisitionWorkers sync.WaitGroup
 	syntheticFixtures  bool
+
+	metadataPlaylistPending atomic.Bool
 }
 
 type Options struct {

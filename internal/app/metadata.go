@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/db"
@@ -15,10 +16,31 @@ import (
 
 func (d *Daemon) handleMetadataRefresh(ctx context.Context) (any, error) {
 	d.managedMu.Lock()
-	defer d.managedMu.Unlock()
 	if d.DB == nil || d.managedFiles == nil {
+		d.managedMu.Unlock()
 		return nil, ipc.NewError(ipc.CodeFailedPrecondition, "managed library not ready")
 	}
+	changedFiles := false
+	defer func() {
+		d.managedMu.Unlock()
+		if changedFiles {
+			d.metadataPlaylistPending.Store(true)
+		}
+		if changedFiles || d.metadataPlaylistPending.Load() {
+			// A disconnected client may interrupt a batch after a file was
+			// published. Give derived playlists a bounded chance to catch up;
+			// failure never rolls back the authoritative file/DB commit.
+			projectionCtx := ctx
+			if ctx.Err() != nil {
+				var cancel context.CancelFunc
+				projectionCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+			}
+			if d.reconcilePlaylistsAfterCommit(projectionCtx, "metadata refresh") {
+				d.metadataPlaylistPending.Store(false)
+			}
+		}
+	}()
 	tracks, err := d.DB.DesiredManagedTracks(ctx)
 	if err != nil {
 		return nil, ipc.NewError(ipc.CodeInternal, "could not read managed tracks")
@@ -37,6 +59,11 @@ func (d *Daemon) handleMetadataRefresh(ctx context.Context) (any, error) {
 			result.MissingOptional++
 		}
 		changed, reason := d.refreshTrack(ctx, item)
+		// An intent may describe a file exchanged before a previous DB commit;
+		// reconciling that record can also leave the prior playlist stale.
+		if changed || item.RefreshIntent != "" {
+			changedFiles = true
+		}
 		if changed {
 			result.Changed++
 		}
@@ -163,7 +190,7 @@ func (d *Daemon) refreshTrack(ctx context.Context, item db.ManagedTrack) (bool, 
 		return false, "managed file changed or replacement interrupted; retry metadata refresh"
 	}
 	if err := d.DB.FinishMetadataReplacement(ctx, uri, name, intent); err != nil {
-		return false, "metadata published but bookkeeping interrupted; retry to reconcile"
+		return true, "metadata published but bookkeeping interrupted; retry to reconcile"
 	}
 	if artState == "failed" {
 		return true, artError
