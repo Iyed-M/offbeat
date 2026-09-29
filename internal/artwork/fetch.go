@@ -34,7 +34,8 @@ type entry struct {
 }
 
 // Fetcher caches at most 32 verified album images (160 MiB maximum).
-// The mutex also coalesces simultaneous requests for the same album.
+// Network requests run without holding the cache mutex, so callers can cancel
+// independently; concurrent misses may fetch the same image twice.
 type Fetcher struct {
 	mu    sync.Mutex
 	cache []entry
@@ -45,6 +46,12 @@ type Fetcher struct {
 }
 
 func New() *Fetcher { return &Fetcher{} }
+
+// NewWithTestRoute routes HTTPS requests to a local TLS fixture while leaving
+// URL/redirect validation intact. Only tests should use this constructor.
+func NewWithTestRoute(address string, tlsConfig *tls.Config) *Fetcher {
+	return &Fetcher{allowPrivate: true, testDial: address, tlsConfig: tlsConfig}
+}
 
 var errUnsafe = errors.New("unsafe artwork destination")
 
@@ -86,11 +93,34 @@ func reserved(ip netip.Addr) bool {
 
 // Get returns a sanitized error; callers must never log the source URL.
 func (f *Fetcher) Get(ctx context.Context, albumURI, raw string) (Image, error) {
+	if err := ctx.Err(); err != nil {
+		return Image{}, err
+	}
 	u, err := validURL(raw)
 	if err != nil {
 		return Image{}, err
 	}
 	key := sha256.Sum256([]byte(albumURI + "\x00" + raw))
+	f.mu.Lock()
+	for _, cached := range f.cache {
+		if cached.key == key {
+			f.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return Image{}, err
+			}
+			return cached.image, nil
+		}
+	}
+	f.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	image, err := f.fetch(ctx, u)
+	if err != nil {
+		return Image{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Image{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, cached := range f.cache {
@@ -98,8 +128,14 @@ func (f *Fetcher) Get(ctx context.Context, albumURI, raw string) (Image, error) 
 			return cached.image, nil
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
+	if len(f.cache) == 32 {
+		f.cache = f.cache[1:]
+	}
+	f.cache = append(f.cache, entry{key, image})
+	return image, nil
+}
+
+func (f *Fetcher) fetch(ctx context.Context, u *url.URL) (Image, error) {
 	transport := &http.Transport{Proxy: nil, TLSClientConfig: f.tlsConfig, DisableKeepAlives: true,
 		TLSHandshakeTimeout: 4 * time.Second, ResponseHeaderTimeout: 4 * time.Second,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -165,10 +201,5 @@ func (f *Fetcher) Get(ctx context.Context, albumURI, raw string) (Image, error) 
 	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
 		return Image{}, errors.New("artwork encoding invalid")
 	}
-	image := Image{Data: data, MIME: contentType}
-	if len(f.cache) == 32 {
-		f.cache = f.cache[1:]
-	}
-	f.cache = append(f.cache, entry{key, image})
-	return image, nil
+	return Image{Data: data, MIME: contentType}, nil
 }

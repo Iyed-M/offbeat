@@ -3,6 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"image"
+	"image/color"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
+	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/managed"
 )
@@ -125,6 +133,108 @@ func TestAcquisitionTagOutcomeIndependentOfPlayableAudio(t *testing.T) {
 				t.Fatalf("restarted artwork state = %q: %v", artworkState, err)
 			}
 		})
+	}
+}
+
+func TestAcquisitionEmbedsFetchedArtworkBeforePublication(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+				t.Fatalf("required artwork integration gate needs %s: %v", tool, err)
+			}
+			t.Skipf("%s unavailable", tool)
+		}
+	}
+	if err := exec.Command("python3", "-I", "-c", "import mutagen; assert mutagen.version_string == '1.47.0'").Run(); err != nil {
+		if os.Getenv("OFFBEAT_REQUIRE_TAGGING") == "1" {
+			t.Fatal("required artwork integration gate needs pinned Mutagen 1.47.0")
+		}
+		t.Skip("pinned Mutagen 1.47.0 unavailable")
+	}
+	home := t.TempDir()
+	original := filepath.Join(home, "fixture.opus")
+	if out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2", "-c:a", "libopus", "-f", "opus", original).CombinedOutput(); err != nil {
+		t.Fatalf("generate Opus fixture: %v %s", err, out)
+	}
+	im := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	im.Set(0, 0, color.RGBA{R: 250, A: 255})
+	var picture bytes.Buffer
+	if err := png.Encode(&picture, im); err != nil {
+		t.Fatal(err)
+	}
+	var fetches atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(picture.Bytes())
+	}))
+	defer server.Close()
+	d := acquisitionDaemon(t, home, retrieveFunc(func(context.Context, string) (*acquisition.Media, error) {
+		file, err := os.Open(original)
+		return &acquisition.Media{File: file, Extension: "opus"}, err
+	}), 1)
+	defer d.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	d.artworkFetcher = artwork.NewWithTestRoute(server.Listener.Addr().String(), &tls.Config{RootCAs: roots, ServerName: server.Certificate().DNSNames[0]})
+	seedAcquisitionTracks(t, d, "one")
+	ctx := context.Background()
+	if _, err := d.DB.ExecContext(ctx, `UPDATE spotify_tracks SET artwork_url = 'https://art.example/cover' WHERE uri = 'spotify:track:one'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DB.EnqueueAcquisition(ctx, "spotify:track:one", "https://fixture.test/audio"); err != nil {
+		t.Fatal(err)
+	}
+	work, err := d.DB.ClaimAcquisition(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.runAcquisition(ctx, work)
+	work, err = d.DB.Acquisition(ctx, work.ID)
+	if err != nil || work.State != db.AcquisitionComplete || fetches.Load() != 1 {
+		t.Fatalf("acquisition: %+v %v fetches=%d", work, err, fetches.Load())
+	}
+	path := managed.TrackPath("spotify:track:one", "opus")
+	if !d.managedFiles.Available("spotify:track:one", path) {
+		t.Fatal("hashed published Opus unavailable")
+	}
+	var storedPath, tagState, artState, artError string
+	if err := d.DB.QueryRowContext(ctx, `SELECT relative_path, tag_state, artwork_state, artwork_error FROM managed_tracks WHERE track_uri='spotify:track:one'`).Scan(&storedPath, &tagState, &artState, &artError); err != nil || storedPath != path || tagState != "tagged" || artState != "embedded" || artError != "" {
+		t.Fatalf("committed presentation: %q %q %q %q: %v", storedPath, tagState, artState, artError, err)
+	}
+	published := filepath.Join(d.Cfg.Paths.MusicRoot, path)
+	// Independent native readback from the published file, including the exact
+	// Opus METADATA_BLOCK_PICTURE payload rather than an in-memory writer value.
+	inspect := `import base64,sys
+from mutagen.flac import Picture
+from mutagen.oggopus import OggOpus
+a=OggOpus(sys.argv[1]); p=Picture(base64.b64decode(a['metadata_block_picture'][0]))
+assert a['title']==['one'] and a['artist']==['Artist'] and a['album']==['Album']
+assert a['spotify_uri']==['spotify:track:one'] and p.mime=='image/png' and p.type==3
+assert p.data==open(sys.argv[2],'rb').read()`
+	picturePath := filepath.Join(home, "cover.png")
+	if err := os.WriteFile(picturePath, picture.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("python3", "-I", "-c", inspect, published, picturePath).CombinedOutput(); err != nil {
+		t.Fatalf("published native tags: %v %s", err, out)
+	}
+	for _, file := range []string{original, published} {
+		out, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1", file).CombinedOutput()
+		if err != nil || !bytes.Contains(out, []byte("codec_name=opus")) {
+			t.Fatalf("published audio probe: %v %s", err, out)
+		}
+	}
+	decode := func(file string) []byte {
+		t.Helper()
+		out, err := exec.Command("ffmpeg", "-v", "error", "-i", file, "-map", "0:a:0", "-f", "hash", "-hash", "SHA256", "-").CombinedOutput()
+		if err != nil {
+			t.Fatalf("decode %s: %v %s", file, err, out)
+		}
+		return out
+	}
+	if !bytes.Equal(decode(original), decode(published)) {
+		t.Fatal("published audio changed")
 	}
 }
 

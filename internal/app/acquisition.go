@@ -429,7 +429,7 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 		artState = "unsupported"
 	} else if track.ArtworkURL != "" {
 		artState = "failed"
-		cover, fetchErr := acquisitionArtwork.Get(ctx, track.Album.URI, track.ArtworkURL)
+		cover, fetchErr := d.artworkFetcher.Get(ctx, track.Album.URI, track.ArtworkURL)
 		if fetchErr != nil {
 			artError = "artwork fetch or validation failed; retry metadata refresh"
 		} else {
@@ -465,5 +465,3 @@ func (d *Daemon) runAcquisition(ctx context.Context, work db.AcquisitionWork) {
 	}
 	d.reconcilePlaylistsAfterCommitLocked(ctx, "Managed track")
 }
-
-var acquisitionArtwork = artwork.New()

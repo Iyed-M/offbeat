@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Iyed-M/offbeat/internal/acquisition"
+	"github.com/Iyed-M/offbeat/internal/artwork"
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
@@ -52,6 +53,7 @@ type Daemon struct {
 	selectionKey       [32]byte
 	selectionKeyErr    error
 	retriever          acquisition.Retriever
+	artworkFetcher     *artwork.Fetcher
 	resolver           acquisition.Resolver
 	inspector          acquisition.Inspector
 	acquisitionCancel  context.CancelFunc
@@ -107,6 +109,7 @@ func NewDaemon(ctx context.Context, opts Options) (*Daemon, error) {
 		livenessInterval:  10 * time.Second,
 		syntheticFixtures: opts.EnableSyntheticFixtures,
 		retriever:         opts.Retriever,
+		artworkFetcher:    artwork.New(),
 		resolver:          opts.Resolver,
 		inspector:         opts.Inspector,
 	}

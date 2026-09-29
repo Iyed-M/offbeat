@@ -132,6 +132,73 @@ func TestRejectUnsafeDestinationsAndCancellation(t *testing.T) {
 	}
 }
 
+func TestConcurrentFetchWaiterCancelsWhileFirstRequestIsInFlight(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	image := pngFixture(t)
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path == "/held" {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(image)
+	}))
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		server.Close()
+	}()
+	f := localFetcher(server)
+	first := make(chan error, 1)
+	go func() { _, err := f.Get(context.Background(), "album", "https://art.example/held"); first <- err }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first fetch did not start")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	second := make(chan error, 1)
+	go func() { _, err := f.Get(ctx, "album", "https://art.example/held"); second <- err }()
+	cancel()
+	select {
+	case err := <-second:
+		if err == nil {
+			t.Fatal("canceled waiter returned artwork")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled waiter blocked on first fetch")
+	}
+	if got, err := f.Get(context.Background(), "other album", "https://art.example/free"); err != nil || !bytes.Equal(got.Data, image) {
+		t.Fatalf("unrelated album blocked: %v", err)
+	}
+	close(release)
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first fetch did not finish")
+	}
+	before := calls.Load()
+	if _, err := f.Get(context.Background(), "album", "https://art.example/held"); err != nil || calls.Load() != before {
+		t.Fatal("successful fetch not cached by album and URL")
+	}
+}
+
 func canceledContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
