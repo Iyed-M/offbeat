@@ -143,6 +143,12 @@ func TestDaemonStartupRepairsPlaylistBeforeReadiness(t *testing.T) {
 	if _, err := os.Lstat(orphanedTemporary); !os.IsNotExist(err) {
 		t.Fatalf("startup left interrupted temporary file behind: %v", err)
 	}
+	// Socket creation precedes the readiness log and accept loop. Wait for
+	// a real Control response before asserting that readiness was reported.
+	response := sendRaw(t, SocketPath(d.socketDir), []byte(`{"version":1,"command":"status"}`+"\n"))
+	if response.Error != nil {
+		t.Fatalf("daemon not ready: %+v", response.Error)
+	}
 	logs, err := os.ReadFile(d.Cfg.Paths.LogFile)
 	if err != nil {
 		t.Fatal(err)
