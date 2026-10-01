@@ -315,9 +315,23 @@ func TestSelectionReceiptRejectsForgeryAndRestart(t *testing.T) {
 		t.Fatal("accepted receipt for different candidate")
 	}
 	forged = *c
-	forged.SelectionReceipt = c.SelectionReceipt[:len(c.SelectionReceipt)-1] + "x"
+	separator := strings.LastIndexByte(c.SelectionReceipt, '.')
+	signature := c.SelectionReceipt[separator+1:]
+	if signature[0] == 'A' {
+		forged.SelectionReceipt = c.SelectionReceipt[:separator+1] + "B" + signature[1:]
+	} else {
+		forged.SelectionReceipt = c.SelectionReceipt[:separator+1] + "A" + signature[1:]
+	}
 	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &forged}); err == nil {
 		t.Fatal("accepted forged signature")
+	}
+	// The final Base64 character of a 32-byte MAC has two unused bits.
+	// Flipping one must not produce another accepted spelling of the receipt.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, signature[len(signature)-1])
+	forged.SelectionReceipt = c.SelectionReceipt[:len(c.SelectionReceipt)-1] + string(alphabet[last^1])
+	if _, err := d.handleYouTubeSelection(ctx, ipc.Request{AcquisitionChoice: &forged}); err == nil {
+		t.Fatal("accepted non-canonical signature encoding")
 	}
 	rejected := *c
 	rejected.VideoID = "ZYXWvu_987-"

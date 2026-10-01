@@ -63,6 +63,9 @@ func (d *Daemon) verifySelection(token string) (selectionEvidence, error) {
 	if err != nil {
 		return e, errors.New("invalid inspection receipt")
 	}
+	if base64.RawURLEncoding.EncodeToString(data) != left || base64.RawURLEncoding.EncodeToString(sig) != right {
+		return e, errors.New("invalid inspection receipt")
+	}
 	mac := hmac.New(sha256.New, d.selectionKey[:])
 	mac.Write(data)
 	if !hmac.Equal(sig, mac.Sum(nil)) {
