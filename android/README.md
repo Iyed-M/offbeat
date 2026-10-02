@@ -94,3 +94,16 @@ skipped compatibility test. The tests cannot prove a third-party player's UI or
 airplane-mode playback. Those require the separate checklist and human evidence.
 
 For a phone check without developer tools, follow [PHONE-CHECK.md](PHONE-CHECK.md).
+
+If folder validation failed before the app saved its selection, the provider
+regression test can use the user's already-persisted grant directly (this argument
+does not grant new access):
+
+```sh
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.tree='content://com.android.externalstorage.documents/tree/primary%3AMusic%2FOffbeat'
+```
+
+The probe compares an ordinary sentinel file before and after directory rename.
+It checks `.nomedia` presence, never its byte contents: Android's MediaProvider may
+write scanner bookkeeping there. See the [platform implementation](https://android.googlesource.com/platform/packages/providers/MediaProvider/+/3bec66b19).

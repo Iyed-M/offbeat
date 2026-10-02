@@ -9,11 +9,11 @@ Do not substitute an emulator or successful SAF probe for ordinary-player eviden
 | Field | Observed value |
 |---|---|
 | Date / app commit | Pending |
-| Phone manufacturer / model | Pending |
-| Android version / API / build | Pending |
+| Phone manufacturer / model | Xiaomi Redmi Note 13 Pro, model 23117RA68G |
+| Android version / API / build | Android 16 / API 36 / OS3.0.305.0.WNFMIXM |
 | Player name / version | Pending |
-| Selected tree URI / provider authority | Pending |
-| Shared local folder (e.g. internal Music/Offbeat) | Pending |
+| Selected tree URI / provider authority | `content://com.android.externalstorage.documents/tree/primary%3AMusic%2FOffbeat` / `com.android.externalstorage.documents` |
+| Shared local folder (e.g. internal Music/Offbeat) | Internal shared storage: Music/Offbeat |
 | Storage approach | SAF persisted read/write tree grant; MediaScanner-assisted indexing |
 | Initial free space | Pending |
 | APK / deterministic checks | Linux build and five JVM storage tests passed; device tests not run |
@@ -81,3 +81,48 @@ embedded artwork. Lint retains advisory warnings about pinned older dependencies
 launcher icon and optional Kotlin extensions. `adb devices -l` listed no connected
 device. Real-provider instrumentation, persisted access after phone reboot,
 ordinary-player indexing/playlists and airplane-mode playback remain **unrun**.
+
+## First physical attempt (2026-10-02)
+
+The user installed and opened the fixture app and granted `Music/Offbeat` access.
+ADB confirms persisted read/write tree access. The storage probe failed with
+`Directory rename did not preserve contents.` and publication stayed disabled.
+No fixture set was published by the UI on this first attempt. This failed
+observation was diagnosed and fixed below; it is not player compatibility evidence.
+USB test installation was initially blocked (`INSTALL_FAILED_USER_RESTRICTED`);
+a later user-approved retry installed the app update and instrumentation APK.
+
+## Rename-probe fix and real-provider tests (2026-10-02)
+
+The unchanged capability probe failed twice on the phone with the same error.
+A temporary diagnostic compared the special marker and ordinary sentinel bytes:
+`.nomedia` changed from 0 to 93 bytes on rename, while the ordinary file remained
+`11, 22, 33` before and after. Android's MediaProvider can store scanner bookkeeping
+in `.nomedia` ([platform change](https://android.googlesource.com/platform/packages/providers/MediaProvider/+/3bec66b19)).
+The previous empty-marker assertion was incorrect. The fixed probe checks marker
+presence and compares ordinary sentinel bytes across rename, then exercises delete.
+Temporary diagnostic code was removed.
+
+Five JVM tests and Android build/lint passed. After installing the corrected app,
+the same formerly failing device regression passed. The complete real-provider
+instrumentation class then passed **2 tests** on this phone using the existing
+persisted Music/Offbeat tree grant:
+
+```sh
+adb -d shell am instrument -w -r \
+  -e class dev.offbeat.storage.SafFixturePublicationTest \
+  -e tree 'content://com.android.externalstorage.documents/tree/primary%3AMusic%2FOffbeat' \
+  dev.offbeat.test/androidx.test.runner.AndroidJUnitRunner
+# OK (2 tests), 10.204 seconds
+```
+
+Observed by tests: required SAF operations, intact audio/playlist bytes in complete
+fixture sets, relative ordered duplicate M3U8 entries and safe EXTINF text,
+controlled replacement failure preserving the prior set, unrelated content
+preserved, and successful indexing callbacks for both synthetic audio files.
+Instrumentation cleans only its own test files afterward.
+
+Still pending: user publication through the corrected UI, selected settings after
+phone reboot, chosen music player/version, cover and playlist display in that
+player, offline playback in airplane mode, unsupported-destination/revoked-access
+checks. These are not established by successful instrumentation.

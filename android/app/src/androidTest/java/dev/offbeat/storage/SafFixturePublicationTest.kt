@@ -17,11 +17,14 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Opt-in real-provider check: select Music/Offbeat in the app before running. */
 @RunWith(AndroidJUnit4::class)
 class SafFixturePublicationTest {
+    @Test fun selectedLocalFolderPassesCapabilityProbe() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        SafFixtureStorage(context, selectedTree(context)).validate()
+    }
+
     @Test fun publishesUsingPersistedGrantAndFailedReplacementPreservesPlayableContent() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val selected = context.getSharedPreferences("storage-proof", Context.MODE_PRIVATE).getString("tree", null)
-        assertNotNull("Open Offbeat and choose an internal Music/Offbeat folder before running device tests.", selected)
-        val tree = Uri.parse(selected!!)
+        val tree = selectedTree(context)
         val storage = SafFixtureStorage(context, tree)
         storage.validate()
         val firstId = UUID.randomUUID().toString()
@@ -41,9 +44,9 @@ class SafFixturePublicationTest {
                     context.assets.open("fixtures/$it").use { stream -> stream.readBytes() }
                 }, failedId, true)
             }
-            // Recreate storage from the saved tree, rather than relying on cached document handles.
-            val reopened = SafFixtureStorage(context, Uri.parse(context.getSharedPreferences(
-                "storage-proof", Context.MODE_PRIVATE).getString("tree", null)!!))
+            // Reopen using the real persisted grant, rather than cached document handles.
+            val persisted = context.contentResolver.persistedUriPermissions.single { it.uri == tree }
+            val reopened = SafFixtureStorage(context, persisted.uri)
             for (file in v1) assertArrayEquals(file.bytes, reopened.read("${first.directory}/${file.path}"))
             assertThrows(IOException::class.java) { reopened.read(".offbeat-staging-$failedId/tracks/a.mp3") }
             val v2 = Fixtures.files(2) { context.assets.open("fixtures/$it").use { stream -> stream.readBytes() } }
@@ -69,5 +72,13 @@ class SafFixturePublicationTest {
             second?.let { storage.deleteTree(it.directory) }
             storage.deleteFile(unrelated)
         }
+    }
+
+    private fun selectedTree(context: Context): Uri {
+        // A failed validation does not save preferences, but its granted tree is still testable.
+        val selected = InstrumentationRegistry.getArguments().getString("tree")
+            ?: context.getSharedPreferences("storage-proof", Context.MODE_PRIVATE).getString("tree", null)
+        assertNotNull("Choose Music/Offbeat in the app, or pass its already-persisted tree URI to this test.", selected)
+        return Uri.parse(selected!!)
     }
 }

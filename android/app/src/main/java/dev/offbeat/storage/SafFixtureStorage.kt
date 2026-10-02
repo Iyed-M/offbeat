@@ -35,10 +35,15 @@ class SafFixtureStorage(context: Context, private val tree: Uri) : FixtureStorag
             writeNew("$probe/.nomedia", "application/octet-stream", byteArrayOf())
             writeNew("$probe/test.partial", "application/octet-stream", byteArrayOf(11, 22, 33))
             check(read("$probe/test.partial").contentEquals(byteArrayOf(11, 22, 33))) { "Provider changed written bytes." }
-            deleteFile("$probe/test.partial")
             renameDirectory(probe, "$probe-renamed")
             current = "$probe-renamed"
-            check(read("$current/.nomedia").isEmpty()) { "Directory rename did not preserve contents." }
+            // MediaProvider writes scanner bookkeeping into .nomedia during rename.
+            // Only its presence matters; ordinary fixture bytes must stay unchanged.
+            read("$current/.nomedia")
+            check(read("$current/test.partial").contentEquals(byteArrayOf(11, 22, 33))) {
+                "Directory rename did not preserve contents."
+            }
+            deleteFile("$current/test.partial")
         } finally {
             deleteTree(current)
         }
