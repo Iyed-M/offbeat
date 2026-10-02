@@ -9,3 +9,9 @@ coverage.html
 *.swp
 .DS_Store
 bin
+
+# Android local tooling and outputs
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/local.properties

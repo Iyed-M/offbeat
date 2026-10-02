@@ -266,3 +266,11 @@ For new implementation work:
 4. use Wayfinder only when a concrete external uncertainty actually blocks implementation.
 
 GitHub issue state and discussion are authoritative for active delivery.
+
+## Android storage proof
+
+The initial Android fixture app and reproducible build/test commands live in
+[android/README.md](android/README.md). It publishes synthetic tagged audio and
+relative M3U8 playlists into a user-selected local shared folder before LAN sync
+integration. [Physical-device evidence](docs/android-storage-device-evidence.md)
+is a separate completion gate; phone/player compatibility is pending.
