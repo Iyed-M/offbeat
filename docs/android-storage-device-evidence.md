@@ -1,14 +1,14 @@
 # Android shared-storage / ordinary-player evidence (#86)
 
-Status: **PENDING — no physical-device or player compatibility claim.**
+Status: **PARTIAL — real-phone SAF tests passed; ordinary-player validation pending.**
 
 Issue #86 remains gated on this record even when deterministic tests and APK builds
-pass. Populate this file (or attach a linked report to the issue) after testing.
+pass. Complete this file (or attach a linked report to the issue) after testing.
 Do not substitute an emulator or successful SAF probe for ordinary-player evidence.
 
 | Field | Observed value |
 |---|---|
-| Date / app commit | Pending |
+| Date / app commit | 2026-10-02 / rename-probe fix (original commit `795a444`, rebased as `d2cc336`) |
 | Phone manufacturer / model | Xiaomi Redmi Note 13 Pro, model 23117RA68G |
 | Android version / API / build | Android 16 / API 36 / OS3.0.305.0.WNFMIXM |
 | Player name / version | Pending |
@@ -16,8 +16,8 @@ Do not substitute an emulator or successful SAF probe for ordinary-player eviden
 | Shared local folder (e.g. internal Music/Offbeat) | Internal shared storage: Music/Offbeat |
 | Storage approach | SAF persisted read/write tree grant; MediaScanner-assisted indexing |
 | Initial free space | Pending |
-| APK / deterministic checks | Linux build and five JVM storage tests passed; device tests not run |
-| Screenshots / recording / instrumentation log | Pending |
+| APK / deterministic checks | Linux build, five JVM storage tests and two real-phone SAF instrumentation tests passed; player/reboot/offline checks pending |
+| Screenshots / recording / instrumentation log | User screenshot on 2026-10-02 confirms selected Music/Offbeat and enabled publication button; instrumentation result recorded below; player evidence pending |
 
 ## Required observations
 
@@ -121,6 +121,9 @@ fixture sets, relative ordered duplicate M3U8 entries and safe EXTINF text,
 controlled replacement failure preserving the prior set, unrelated content
 preserved, and successful indexing callbacks for both synthetic audio files.
 Instrumentation cleans only its own test files afterward.
+
+The user's corrected-app screenshot confirms `Music/Offbeat` is accepted and the
+publication button is enabled. It still shows `No fixture set published.`
 
 Still pending: user publication through the corrected UI, selected settings after
 phone reboot, chosen music player/version, cover and playlist display in that
