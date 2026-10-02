@@ -179,6 +179,12 @@ func (l *Loader) Load() (Config, error) {
 	if err := ValidateSpotifyAdapter(cfg.SpotifyAdapter); err != nil {
 		return cfg, err
 	}
+	if cfg.Sync.HTTPSPort < 0 || cfg.Sync.HTTPSPort > 65535 {
+		return cfg, fmt.Errorf("sync https_port must be between 0 (disabled) and 65535")
+	}
+	if _, err := netip.ParseAddr(cfg.Sync.LANBindAddress); err != nil {
+		return cfg, fmt.Errorf("sync lan_bind_address must be an IP address")
+	}
 	if cfg.Acquisition.Concurrency < 1 || cfg.Acquisition.Concurrency > 32 {
 		return cfg, fmt.Errorf("acquisition concurrency must be between 1 and 32")
 	}

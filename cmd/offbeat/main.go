@@ -49,6 +49,12 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(runConfig(configPath, homeDir))
+	case "sync":
+		if len(rest) != 1 || (rest[0] != "setup" && rest[0] != "reset" && rest[0] != "status") {
+			fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat sync setup|reset|status")
+			os.Exit(2)
+		}
+		os.Exit(runSync(configPath, homeDir, rest[0]))
 	case "spotify":
 		if len(rest) != 1 || rest[0] != "sync" {
 			fmt.Fprintln(os.Stderr, "offbeat: usage: offbeat spotify sync")
@@ -130,6 +136,7 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  status    report daemon/database status through the control socket")
 	fmt.Println("  config        print the daemon's sanitized effective configuration")
+	fmt.Println("  sync setup|reset|status  Provision or inspect LAN sync")
 	fmt.Println("  spotify sync  request a candidate Spotify snapshot from the adapter")
 	fmt.Println("  metadata refresh  apply current Spotify tags and artwork to available tracks")
 	fmt.Println("  missing       list supported desired tracks without a managed file")

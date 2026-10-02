@@ -69,6 +69,10 @@ offbeatd --config /path/to/config.toml --home /tmp/sandbox
 offbeat  --config /path/to/config.toml status
 ```
 
+## LAN sync serving
+
+The desktop provides opt-in authenticated HTTPS manifests and downloads for one-phone manual sync. Run `offbeat sync setup`, `offbeat sync reset` or `offbeat sync status` through the local Control socket after configuring a LAN address and nonzero HTTPS port. See [LAN sync setup and protocol](docs/lan-sync.md) for private provisioning, certificate trust, file versions and limits. Android synchronization is a separate M8 deliverable.
+
 ## Development Adapter credential
 
 Until setup/provisioning is implemented, the daemon accepts a development-only Adapter credential through:

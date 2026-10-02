@@ -18,6 +18,7 @@ import (
 	"github.com/Iyed-M/offbeat/internal/config"
 	"github.com/Iyed-M/offbeat/internal/db"
 	"github.com/Iyed-M/offbeat/internal/ipc"
+	"github.com/Iyed-M/offbeat/internal/lansync"
 	"github.com/Iyed-M/offbeat/internal/logging"
 	"github.com/Iyed-M/offbeat/internal/managed"
 	"github.com/coder/websocket"
@@ -50,6 +51,16 @@ type Daemon struct {
 	livenessInterval   time.Duration
 	managedFiles       *managed.Files
 	managedMu          sync.Mutex
+	syncMu             sync.Mutex
+	syncStopping       bool
+	syncIdentity       *lansync.Identity
+	syncServer         *http.Server
+	syncCancel         context.CancelFunc
+	syncServeDone      chan struct{}
+	syncHandlers       sync.WaitGroup
+	syncSlots          chan struct{}
+	syncCacheMu        sync.Mutex
+	syncCache          map[string]syncFileCache
 	playlistMu         sync.Mutex
 	selectionKeyOnce   sync.Once
 	selectionKey       [32]byte
@@ -218,6 +229,7 @@ func (d *Daemon) closeAfterError(cause error) error {
 
 func (d *Daemon) releaseResources() error {
 	var errs []error
+	d.stopLANSync()
 	d.stopAcquisitionWork()
 	d.stopAdapterWork()
 	if d.adapterServer != nil {
@@ -302,6 +314,10 @@ func (d *Daemon) Run(ctx context.Context, opts RunOptions) error {
 			d.Logger.Error("adapter endpoint serve failed", "err", err)
 		}
 	}()
+
+	if err := d.startLANSync(ctx); err != nil {
+		return d.shutdown(err)
+	}
 
 	stale, err := ResolveStaleSocket(d.socketDir)
 	if err != nil {
@@ -461,6 +477,8 @@ func (d *Daemon) handleControlRequest(ctx context.Context, req ipc.Request) (any
 		return d.handleStatus(ctx)
 	case "config":
 		return d.handleConfig(ctx)
+	case "sync.setup", "sync.reset", "sync.status":
+		return d.handleSyncControl(req.Command)
 	case "spotify.sync":
 		return d.handleSpotifySync(ctx)
 	case "metadata.refresh":

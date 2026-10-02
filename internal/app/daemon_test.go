@@ -518,6 +518,9 @@ func TestStatusCommandServesOneRequestPerConnection(t *testing.T) {
 
 func TestConfigCommandReportsSanitizedEffectiveConfig(t *testing.T) {
 	dir := t.TempDir()
+	// Sync settings now bind a real listener, so use a reachable test address
+	// and a reserved port rather than the old illustrative LAN configuration.
+	syncPort := availableAdapterTestPort(t)
 	customDB := filepath.Join(dir, "custom.db")
 	cfgPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(`
@@ -543,10 +546,10 @@ ffmpeg_path = "/opt/ffmpeg"
 ffprobe_path = "/opt/ffprobe"
 
 [sync]
-https_port = 8443
-lan_bind_address = "192.168.1.20"
+https_port = %d
+lan_bind_address = "127.0.0.1"
 pairing_timeout = "10m"
-`, customDB)), 0o600); err != nil {
+`, customDB, syncPort)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -598,7 +601,7 @@ pairing_timeout = "10m"
 	if cfg.Downloader.YTDLPPath != "/usr/local/bin/yt-dlp" || cfg.Downloader.FFmpegPath != "/opt/ffmpeg" || cfg.Downloader.FFprobePath != "/opt/ffprobe" {
 		t.Errorf("Downloader=%+v", cfg.Downloader)
 	}
-	if cfg.Sync.HTTPSPort != 8443 || cfg.Sync.LANBindAddress != "192.168.1.20" || cfg.Sync.PairingTimeout != "10m0s" {
+	if cfg.Sync.HTTPSPort != syncPort || cfg.Sync.LANBindAddress != "127.0.0.1" || cfg.Sync.PairingTimeout != "10m0s" {
 		t.Errorf("Sync=%+v", cfg.Sync)
 	}
 }
